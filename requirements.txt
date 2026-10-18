@@ -1,0 +1,6 @@
+anthropic>=0.40
+scenedetect[opencv]>=0.6.4
+numpy
+librosa>=0.10          # 音乐卡点（可选，但推荐）
+static-ffmpeg>=3.0    # 没装 Homebrew 时用它自带的 ffmpeg/ffprobe（装了 brew 可以删掉这行）
+# faster-whisper>=1.0  # 语音转写（可选）：取消这行注释再 pip install -r requirements.txt

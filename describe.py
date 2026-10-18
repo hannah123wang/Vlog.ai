@@ -1,0 +1,80 @@
+"""Step 4 — the AI "watches" every shot (keyframes + transcript) and writes a log entry.
+
+Results are cached per shot in work/logs/, so re-running only pays for new shots.
+"""
+from __future__ import annotations
+
+import json
+from concurrent.futures import ThreadPoolExecutor
+
+from .common import Project, log, read_json, write_json
+from .transcribe import speech_for
+
+SYSTEM = """You are an assistant editor logging raw travel-vlog footage.
+You see a few keyframes from ONE shot (in time order, timestamps relative to the shot start)
+plus metadata and any transcribed speech. Describe what is actually visible/audible — do not invent.
+Reply with ONLY a JSON object, no prose."""
+
+PROMPT = """<meta>{meta}</meta>
+Keyframe times (s, relative to shot start): {times}
+Transcribed speech in this shot: {speech}
+
+Return JSON with exactly these keys:
+{{
+ "summary": "one vivid sentence of what happens",
+ "place": "best guess of the kind of place / landmark if recognisable, else ''",
+ "people": ["who appears, e.g. 'me (selfie)', 'friend', 'street vendor'"],
+ "activity": "what is happening",
+ "mood": "emotional tone, 1-3 words",
+ "shot_type": "one of: wide, medium, close-up, detail, selfie, pov, drone, timelapse, screen",
+ "story_roles": ["any of: opener, establishing, travel-transition, arrival, food, moment, reaction, reflection, climax, ending, b-roll"],
+ "highlight": 1-10 integer (how much a viewer would want to see this; blurry/shaky/nothing happening = low),
+ "best_moment": {{"start": seconds, "end": seconds}}  (best continuous 2-8s part, relative to shot start, within 0..{dur}),
+ "keep_audio": true if the original sound/speech is worth hearing in the final vlog,
+ "tags": ["3-6 short search tags"]
+}}
+Write all free-text values in {lang}."""
+
+
+def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4) -> None:
+    shots = read_json(project.shots_json)
+    if not shots:
+        raise SystemExit("先运行 frames")
+    todo = [s for s in shots if not (project.logs_dir / f"{s['id']}.json").exists()]
+    log(f"AI 看素材：{len(shots)} 个镜头，其中 {len(todo)} 个需要新分析（{llm.name}）…")
+    if not todo:
+        return
+
+    def work(s: dict):
+        speech = speech_for(project, s["clip_id"], s["start"], s["end"])
+        meta = {"file": s["src"].split("/")[-1], "day": s["day"], "recorded": s["created"],
+                "gps": s["gps"], "duration": s["duration"], "quality": s["quality"],
+                "speech": bool(speech)}
+        prompt = PROMPT.format(
+            meta=json.dumps(meta, ensure_ascii=False),
+            times=[round(f["t"] - s["start"], 1) for f in s["frames"]],
+            speech=speech or "(none)", dur=round(s["duration"], 1), lang=lang)
+        try:
+            d = llm.describe(SYSTEM, prompt, [f["path"] for f in s["frames"]])
+        except Exception as e:  # noqa: BLE001
+            log(f"  {s['id']} 分析失败，稍后重跑会再试: {e}")
+            return
+        d["speech"] = speech
+        write_json(project.logs_dir / f"{s['id']}.json", d)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for i, _ in enumerate(ex.map(work, todo), 1):
+            if i % 20 == 0 or i == len(todo):
+                log(f"  {i}/{len(todo)}")
+    if llm.usage["input_tokens"]:
+        log(f"  本步用量：输入 {llm.usage['input_tokens']:,} tokens，输出 {llm.usage['output_tokens']:,} tokens")
+
+
+def load_logged_shots(project: Project) -> list[dict]:
+    """Shots merged with their AI log — the material the story step works from."""
+    out = []
+    for s in read_json(project.shots_json, []):
+        d = read_json(project.logs_dir / f"{s['id']}.json")
+        if d:
+            out.append({**s, "log": d})
+    return out

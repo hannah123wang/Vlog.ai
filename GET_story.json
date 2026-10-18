@@ -1,0 +1,84 @@
+{
+  "title": "我的旅行 (mock)",
+  "logline": "离线模拟生成的粗剪，用来测试流程",
+  "chapters": [
+    {
+      "name": "Day 1",
+      "purpose": "按天记录"
+    },
+    {
+      "name": "Day 2",
+      "purpose": "按天记录"
+    },
+    {
+      "name": "Day 3",
+      "purpose": "按天记录"
+    }
+  ],
+  "total_seconds": 48.9,
+  "timeline": [
+    {
+      "shot_id": "c0003_s01",
+      "in": 0.0,
+      "out": 2.0,
+      "chapter": "Day 1",
+      "role": "moment",
+      "why": "离线模拟：按时间顺序挑选清晰镜头",
+      "keep_audio": false,
+      "text": "",
+      "src": "/home/claude/vlog-ai/test_footage/IMG_0003_selfie_vertical.mp4",
+      "src_in": 0.0,
+      "src_out": 2.0,
+      "i": 0,
+      "at": 0.0,
+      "dur": 2.0,
+      "thumb": "/media/studio-test/frames/c0003/c0003_s01_1.jpg",
+      "summary": "（离线模拟）IMG_0003_selfie_vertical 的画面",
+      "shot_dur": 7.0,
+      "quality": 0.533,
+      "highlight": 6
+    },
+    {
+      "shot_id": "c0005_s01",
+      "in": 0.0,
+      "out": 5.45,
+      "chapter": "Day 1",
+      "role": "moment",
+      "why": "离线模拟：按时间顺序挑选清晰镜头",
+      "keep_audio": false,
+      "text": "",
+      "src": "/home/claude/vlog-ai/test_footage/IMG_0005_street_food.mp4",
+      "src_in": 0.0,
+      "src_out": 5.45,
+      "i": 1,
+      "at": 2.0,
+      "dur": 5.45,
+      "thumb": "/media/studio-test/frames/c0005/c0005_s01_1.jpg",
+      "summary": "（离线模拟）IMG_0005_street_food 的画面",
+      "shot_dur": 8.0,
+      "quality": 0.882,
+      "highlight": 8
+    },
+    {
+      "shot_id": "c0007_s01",
+      "in": 0.0,
+      "out": 5.45,
+      "chapter": "Day 2",
+      "role": "moment",
+      "why": "离线模拟：按时间顺序挑选清晰镜头",
+      "keep_audio": false,
+      "text": "Day 2",
+      "src": "/home/claude/vlog-ai/test_footage/IMG_0007_hike.mp4",
+      "src_in": 0.0,
+      "src_out": 5.45,
+      "i": 2,
+      "at": 7.5,
+      "dur": 5.45,
+      "thumb": "/media/studio-test/frames/c0007/c0007_s01_1.jpg",
+      "summary": "（离线模拟）IMG_0007_hike 的画面",
+      "shot_dur": 10.0,
+      "quality": 0.532,
+      "highlight": 6
+    }
+  ]
+}

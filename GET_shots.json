@@ -1,0 +1,52 @@
+{
+  "shots": [
+    {
+      "id": "c0001_s01",
+      "day": 1,
+      "time": "08:10",
+      "duration": 6.0,
+      "quality": 0.964,
+      "thumb": "/media/studio-test/frames/c0001/c0001_s01_1.jpg",
+      "file": "IMG_0001_airport.mp4",
+      "summary": "（离线模拟）IMG_0001_airport 的画面",
+      "place": "Day 1",
+      "shot_type": "medium",
+      "highlight": 9,
+      "mood": "平静",
+      "people": [],
+      "speech": ""
+    },
+    {
+      "id": "c0002_s01",
+      "day": 1,
+      "time": "10:30",
+      "duration": 9.0,
+      "quality": 0.074,
+      "thumb": "/media/studio-test/frames/c0002/c0002_s01_1.jpg",
+      "file": "IMG_0002_plane_window.mp4",
+      "summary": "（离线模拟）IMG_0002_plane_window 的画面",
+      "place": "Day 1",
+      "shot_type": "wide",
+      "highlight": 3,
+      "mood": "平静",
+      "people": [],
+      "speech": ""
+    },
+    {
+      "id": "c0003_s01",
+      "day": 1,
+      "time": "15:02",
+      "duration": 7.0,
+      "quality": 0.533,
+      "thumb": "/media/studio-test/frames/c0003/c0003_s01_1.jpg",
+      "file": "IMG_0003_selfie_vertical.mp4",
+      "summary": "（离线模拟）IMG_0003_selfie_vertical 的画面",
+      "place": "Day 1",
+      "shot_type": "medium",
+      "highlight": 6,
+      "mood": "平静",
+      "people": [],
+      "speech": ""
+    }
+  ]
+}
