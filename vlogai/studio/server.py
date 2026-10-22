@@ -15,14 +15,16 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .. import applog, config
+from ..applog import log
 from .. import describe as describe_mod
 from .. import export_xml, frames, outline, probe, render, story, storyboard, transcribe
 from ..common import VIDEO_EXTS, Project, read_json, require_ffmpeg, write_json
-from ..llm import get_llm, key_hint
+from ..llm import get_llm, key_hint, test_key
 from .jobs import JobRunner
 
 WEB = Path(__file__).parent / "web"
-PROJECTS = Path("projects").resolve()
+PROJECTS = Path(config.get("projects_dir")).expanduser().resolve()   # 启动时按设置定下来
 LANGS = {"zh": "Simplified Chinese", "en": "English"}
 runner = JobRunner()
 
@@ -77,7 +79,7 @@ def project_summary(pid: str) -> dict:
         "clips": len(clips), "shots": len(shots), "logged": logs,
         "duration_min": round(sum(c["duration"] for c in clips) / 60, 1),
         "days": len({c["created"][:10] for c in clips}) if clips else 0,
-        "unusable": sum(1 for s_ in shots if s_.get("quality", 1) < 0.25),
+        "unusable": sum(1 for s_ in shots if s_.get("quality", 1) < float(config.get("bad_quality"))),
         "has_outline": bool(ol.get("beats")),
         "beats": len(ol.get("beats", [])),
         "has_story": bool(st.get("timeline")),
@@ -190,7 +192,7 @@ def job_analyze(pid: str, mock: bool, lang: str, whisper: bool, workers: int = 4
     p = project_dir(pid)
     frames.extract(p, workers=workers)
     if whisper:
-        transcribe.transcribe(p)
+        transcribe.transcribe(p, config.get("whisper_model"))
     describe_mod.describe_all(p, get_llm(mock), lang=LANGS[lang], workers=workers)
 
 
@@ -226,14 +228,17 @@ def job_revise(pid: str, instruction: str, minutes: float, mock: bool, lang: str
 def job_render(pid: str, music: str | None, vertical: bool, hd: bool):
     p = project_dir(pid)
     p.save_settings(music=music or None, vertical=vertical)
-    render.render(p, music=music or None, vertical=vertical, hd=hd)
+    cfg = config.load()
+    render.render(p, music=music or None, vertical=vertical, hd=hd, font=cfg["font"] or None,
+                  snap=cfg["beat_snap"], music_volume=float(cfg["music_volume"]),
+                  captions=cfg["burn_captions"], duck=cfg["duck_music"])
     export_xml.export_xml(p, music=music or None)
 
 
 def job_export(pid: str):
     p = project_dir(pid)
     s = p.settings()
-    render.final_timeline(p, s.get("music"))
+    render.final_timeline(p, s.get("music"), snap=config.get("beat_snap"))
     export_xml.export_xml(p, music=s.get("music"))
 
 
@@ -243,7 +248,7 @@ def job_recheck(pid: str):
     story.recheck(p)
     storyboard.storyboard(p)
     s = p.settings()
-    render.final_timeline(p, s.get("music") or None)
+    render.final_timeline(p, s.get("music") or None, snap=config.get("beat_snap"))
     export_xml.export_xml(p, music=s.get("music") or None)
     print("[vlogai] story.json 校验完成，故事板和 XML 已更新")
 
@@ -288,12 +293,49 @@ def restore_version(pid: str, n: int) -> dict:
     return story_payload(pid)
 
 
+def settings_payload() -> dict:
+    from importlib.util import find_spec
+    return {"settings": config.load(), "defaults": config.DEFAULTS, "key": key_hint(),
+            "settings_file": str(config.path()), "env_file": str(Path.cwd() / ".env"),
+            "projects_path": str(PROJECTS), "detected_font": render.find_font(None) or "",
+            "has_whisper": find_spec("faster_whisper") is not None,
+            "running_port": RUNNING.get("port")}
+
+
+def _open_path(path: Path):
+    if os.name == "nt":
+        os.startfile(str(path))  # noqa: S606
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+
+
+RUNNING: dict = {}
+
+
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     server_version = "vlogai-studio"
 
-    def log_message(self, fmt, *args):  # 安静一点
-        pass
+    # -- 日志：GET 只在 DEBUG 级别记录（网页每秒都在轮询），POST 和出错的请求总会记录
+    def log_request(self, code="-", size="-"):
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            code = 0
+        path = urllib.parse.unquote(self.path.split("?")[0])
+        msg = f"{self.command} {path} → {code}"
+        if code >= 400 and not path.endswith("favicon.ico"):
+            log.warning(msg + (f"  {self._err}" if getattr(self, "_err", "") else ""))
+        elif self.command == "POST":
+            log.info(msg)
+        else:
+            log.debug(msg)
+
+    def log_error(self, fmt, *args):
+        log.warning("HTTP " + (fmt % args))
+
+    def log_message(self, fmt, *args):
+        log.debug("HTTP " + (fmt % args))
 
     # -- plumbing
     def _cors(self):
@@ -320,6 +362,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def json(self, data, code: int = 200):
+        self._err = data.get("error", "") if isinstance(data, dict) and code >= 400 else ""
         self._send(code, json.dumps(data, ensure_ascii=False).encode(), "application/json")
 
     def body(self) -> dict:
@@ -379,6 +422,15 @@ class Handler(BaseHTTPRequestHandler):
                 kh = key_hint()
                 return self.json({"has_key": kh["has_key"], "key": kh,
                                   "home": str(Path.home()), "cwd": str(Path.cwd()), "drives": drives})
+            if path == "/api/settings":
+                return self.json(settings_payload())
+            if path == "/api/logs":
+                return self.json({"entries": applog.read_entries(q.get("level", ["DEBUG"])[0], q.get("q", [""])[0],
+                                                                 int(q.get("limit", ["800"])[0])),
+                                  "counts": applog.COUNTS, "file": str(applog.LOG_FILE),
+                                  "level": config.get("log_level")})
+            if path == "/api/logs/summary":
+                return self.json({"counts": applog.COUNTS})
             if path == "/api/ls":
                 return self.json(browse(q.get("path", [""])[0]))
             if path == "/api/projects":
@@ -405,7 +457,10 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 return self.json({"versions": list_versions(project_dir(urllib.parse.unquote(m.group(1))))})
             return self.json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            log.debug(f"浏览器提前断开：GET {path}")
         except Exception as e:  # noqa: BLE001
+            log.exception(f"接口出错：GET {path}")
             return self.json({"error": f"{e.__class__.__name__}: {e}"}, 500)
 
     def do_POST(self):  # noqa: N802
@@ -413,6 +468,27 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path
         try:
             b = self.body()
+            if path == "/api/settings":
+                if b.get("reset"):
+                    config.reset()
+                    applog.set_level(config.get("log_level"))
+                    log.info("设置已恢复默认")
+                if b.get("api_key"):
+                    config.write_env_key(b["api_key"])
+                    log.info(f"API Key 已更新：{key_hint()['hint']}")
+                if b.get("settings"):
+                    config.save(b["settings"])
+                    applog.set_level(config.get("log_level"))
+                    log.info("设置已保存：" + "，".join(f"{k}={v}" for k, v in b["settings"].items()))
+                return self.json(settings_payload())
+            if path == "/api/settings/test":
+                return self.json(test_key(b.get("api_key") or None))
+            if path == "/api/logs/open":
+                _open_path(applog.LOG_DIR)
+                return self.json({"ok": True})
+            if path == "/api/settings/open_projects":
+                _open_path(PROJECTS)
+                return self.json({"ok": True})
             if path == "/api/projects":
                 name = (b.get("name") or "").strip() or Path(b["footage"]).name
                 pid = re.sub(r"[^\w\-. ]", "", name).strip() or "project"
@@ -423,13 +499,14 @@ class Handler(BaseHTTPRequestHandler):
             if not m:
                 return self.json({"error": "not found"}, 404)
             pid, action = urllib.parse.unquote(m.group(1)), m.group(2)
-            lang = b.get("lang", "zh")
+            lang = b.get("lang") or config.get("lang")
             mock = bool(b.get("mock"))
             minutes = float(b.get("minutes") or project_dir(pid).settings().get("minutes") or 3)
 
             if action == "analyze":
                 runner.start("看素材", pid, job_analyze, pid, mock, lang,
-                             bool(b.get("whisper")), int(b.get("workers") or 4))
+                             bool(b.get("whisper", config.get("whisper"))),
+                             int(b.get("workers") or config.get("workers")))
             elif action == "outline":
                 runner.start("编故事线", pid, job_outline, pid, b.get("idea", ""), minutes,
                              mock, lang)
@@ -456,6 +533,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             return self.json({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001
+            log.exception(f"接口出错：POST {path}")
             return self.json({"error": f"{e.__class__.__name__}: {e}"}, 500)
 
 
@@ -495,10 +573,7 @@ def _sync_action(self, pid: str, action: str, b: dict):
         write_json(p.settings_json, s)
         return {"settings": s}
     if action == "open_folder":
-        if os.name == "nt":
-            os.startfile(str(p.root))  # noqa: S606
-        else:
-            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(p.root)])
+        _open_path(p.root)
         return {"ok": True}
     raise ValueError(action)
 
@@ -506,9 +581,28 @@ def _sync_action(self, pid: str, action: str, b: dict):
 Handler._sync_action = _sync_action
 
 
-def serve(port: int = 8765, open_browser: bool = True):
+def _startup_info():
+    import platform
+    import shutil
+    venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    log.info("=" * 60)
+    log.info(f"vlogai studio 启动 · Python {platform.python_version()} · {sys.executable}"
+             + ("" if venv else "  ← 没有在虚拟环境里运行"))
+    log.info(f"工作目录 {Path.cwd()} · 设置文件 {config.path().name}"
+             + ("" if config.path().exists() else "（未创建，全部用默认值）"))
+    log.info(f"日志文件 {applog.LOG_FILE} · 级别 {config.get('log_level')}")
+    log.info(f"ffmpeg {shutil.which('ffmpeg') or '未找到'}")
+    cfg = config.load()
+    log.info(f"抽帧：每 {cfg['frame_every_sec']} 秒，最多 {cfg['max_frames_per_shot']} 帧，{cfg['frame_width']}px · "
+             f"并行 {cfg['workers']} · 语音转写 {cfg['whisper_model'] if cfg['whisper'] else '关'}")
+
+
+def serve(port: int | None = None, open_browser: bool = True):
+    applog.setup(config.get("log_level"))
+    _startup_info()
     require_ffmpeg()
-    PROJECTS.mkdir(exist_ok=True)
+    port = int(port or config.get("port"))
+    PROJECTS.mkdir(parents=True, exist_ok=True)
     httpd, chosen = None, port
     for cand in range(port, port + 12):          # 端口被占就自动换一个，不让它拦住你
         try:
@@ -518,21 +612,26 @@ def serve(port: int = 8765, open_browser: bool = True):
         except OSError as e:
             if e.errno not in (48, 98, 10048):   # 48=macOS 98=Linux 10048=Windows: 端口被占用
                 raise
-            print(f"[vlogai studio] 端口 {cand} 被占用，换一个…")
+            log.warning(f"端口 {cand} 被占用，换一个…")
     if httpd is None:
+        log.error(f"端口 {port}-{port+11} 全都被占用了")
         raise SystemExit(f"{port}-{port+11} 全都被占用了。先关掉其他程序，或者用 --port 指定别的端口。")
     port = chosen
+    RUNNING["port"] = port
     url = f"http://127.0.0.1:{port}"
-    print(f"[vlogai studio] 已启动：{url}")
-    print(f"[vlogai studio] 项目文件夹：{PROJECTS}")
+    log.info(f"项目文件夹：{PROJECTS}")
     kh = key_hint()
     if not kh["has_key"]:
-        print("[vlogai studio] 注意：没有 ANTHROPIC_API_KEY，只能用离线模拟模式")
+        log.warning("没有 ANTHROPIC_API_KEY，只能用离线模拟模式（到设置页填写）")
     else:
-        print(f"[vlogai studio] API Key：{kh['hint']}（{kh['length']} 位，来自 {kh['source']}）"
-              + ("" if kh["looks_ok"] else "  ← 看起来不对：应以 sk-ant- 开头且不含空格"))
+        msg = f"API Key：{kh['hint']}（{kh['length']} 位，来自 {kh['source']}）"
+        if kh["looks_ok"]:
+            log.info(msg)
+        else:
+            log.warning(msg + "  ← 看起来不对：应以 sk-ant- 开头且不含空格")
         if kh["base_url"]:
-            print(f"[vlogai studio] 注意：设置了 ANTHROPIC_BASE_URL={kh['base_url']}，请求不会直接发到 Anthropic")
+            log.warning(f"设置了 API 地址 {kh['base_url']}，请求不会直接发到 Anthropic")
+    log.info(f"已启动：{url}   （关闭：在这个窗口按 Ctrl+C）")
     if open_browser:
         try:
             import webbrowser
@@ -542,4 +641,4 @@ def serve(port: int = 8765, open_browser: bool = True):
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[vlogai studio] 已停止")
+        log.info("已停止（Ctrl+C）")

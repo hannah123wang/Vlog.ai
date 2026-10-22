@@ -10,7 +10,10 @@ import re
 import threading
 import traceback
 from contextlib import redirect_stdout
+import time
 from datetime import datetime
+
+from ..applog import log, pipeline_line
 
 PROGRESS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
@@ -48,7 +51,9 @@ class Job:
         self.started = datetime.now().isoformat(timespec="seconds")
         self._lock = threading.Lock()
 
-    def add_line(self, line: str) -> None:
+    def add_line(self, line: str, to_log: bool = True) -> None:
+        if to_log:                      # 同步写到终端和 logs/vlogai.log
+            pipeline_line(line, f"{self.name}·{self.project}")
         with self._lock:
             self.lines.append(line)
             if len(self.lines) > 500:
@@ -87,18 +92,30 @@ class JobRunner:
 
         def run():
             stream = _LineStream(job)
+            t0 = time.time()
+            log.info(f"▶ 开始任务「{name}」 项目 {project}")
             try:
                 with redirect_stdout(stream):
                     fn(*args, **kwargs)
                 stream.flush()
                 job.status = "done"
-                job.add_line("✓ 完成")
-            except Exception as e:  # noqa: BLE001
+                job.add_line("✓ 完成", to_log=False)
+                log.info(f"✓ 任务完成「{name}」 项目 {project}，用时 {time.time() - t0:.1f} 秒")
+            except SystemExit as e:
+                # pipeline 里用 raise SystemExit("…") 报“前置步骤没做”这类错误；
+                # 以前这里接不住，任务会永远停在“运行中”
+                stream.flush()
+                job.status = "error"
+                job.error = str(e.code) if isinstance(e.code, str) else f"程序退出（代码 {e.code}）"
+                job.add_line("✗ " + job.error, to_log=False)
+                log.error(f"✗ 任务失败「{name}」 项目 {project}：{job.error}")
+            except BaseException as e:  # noqa: BLE001
                 stream.flush()
                 job.status = "error"
                 job.error = f"{e.__class__.__name__}: {e}"
-                job.add_line("✗ " + job.error)
-                job.add_line(traceback.format_exc()[-1500:])
+                job.add_line("✗ " + job.error, to_log=False)
+                job.add_line(traceback.format_exc()[-1500:], to_log=False)
+                log.exception(f"✗ 任务失败「{name}」 项目 {project}，用时 {time.time() - t0:.1f} 秒")
 
         threading.Thread(target=run, daemon=True).start()
         return job

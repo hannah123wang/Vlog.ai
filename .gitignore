@@ -30,3 +30,9 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+
+# 本机设置（界面“设置”页）
+vlogai_settings.json
+
+# 运行日志
+logs/
