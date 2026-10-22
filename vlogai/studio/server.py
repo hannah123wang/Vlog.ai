@@ -15,7 +15,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .. import applog, config
+from .. import __version__, applog, config
 from ..applog import log
 from .. import describe as describe_mod
 from .. import export_xml, frames, outline, probe, render, story, storyboard, transcribe
@@ -420,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
                 drives = ([f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
                           if os.name == "nt" else [])
                 kh = key_hint()
-                return self.json({"has_key": kh["has_key"], "key": kh,
+                return self.json({"has_key": kh["has_key"], "key": kh, "version": __version__,
                                   "home": str(Path.home()), "cwd": str(Path.cwd()), "drives": drives})
             if path == "/api/settings":
                 return self.json(settings_payload())
@@ -586,7 +586,8 @@ def _startup_info():
     import shutil
     venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     log.info("=" * 60)
-    log.info(f"vlogai studio 启动 · Python {platform.python_version()} · {sys.executable}"
+    log.info(f"vlogai studio 版本 {__version__}")
+    log.info(f"启动 · Python {platform.python_version()} · {sys.executable}"
              + ("" if venv else "  ← 没有在虚拟环境里运行"))
     log.info(f"工作目录 {Path.cwd()} · 设置文件 {config.path().name}"
              + ("" if config.path().exists() else "（未创建，全部用默认值）"))
