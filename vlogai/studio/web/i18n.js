@@ -1,0 +1,513 @@
+/* vlogai studio —— 界面多语言。
+ *
+ * 用法：tr('中文原文 {0}', 参数…)。键就是中文原文，所以 app.js 里读到的仍然是中文；
+ * 其他语言在下面按“中文原文 → 译文”写。缺翻译时显示中文原文（并记到 I18N.missing 里）。
+ * 译文可以是 [单数, 复数] 两种写法，按第一个参数是否为 1 选择。
+ *
+ * 加一种语言：在 LANGS 里加一项，在 DICT 里加一份同样的映射（PATTERNS 可选）。
+ */
+(function () {
+  'use strict';
+
+  const LANGS = [['zh', '简体中文'], ['en', 'English']];
+
+  const DICT = {
+    en: {
+      // ---- 通用 / 框架
+      '服务器没有返回 JSON': 'The server did not return JSON',
+      '请求失败 ({0})': 'Request failed ({0})',
+      '请求失败': 'Request failed',
+      '出错了': 'Something went wrong',
+      '好了': 'Done',
+      '确定': 'OK',
+      '取消': 'Cancel',
+      '日志': 'Log',
+      '收起': 'Hide',
+      '{0}失败': '{0} failed',
+      '{0}完成': '{0} finished',
+      '项目': 'Project',
+      '当前项目': 'Current project',
+      '步骤': 'Steps',
+      '离线模拟': 'Offline mock',
+      '离线模拟：不调用 AI、不花钱，用来测试流程': 'Offline mock: no AI calls, no cost — for testing the workflow',
+      '关闭': 'Close',
+      '界面语言': 'Interface language',
+      '界面': 'Interface',
+      '只改变界面上的文字，保存在这个浏览器里。AI 写的镜头日志和字幕用什么语言，在下面的「字幕和日志的语言」里设置。':
+        'Changes only the interface text, and is remembered in this browser. The language the AI writes shot logs and captions in is set under “Caption and log language” below.',
+      // 任务名（来自后端）
+      '扫描素材': 'Scanning footage',
+      '看素材': 'Analyzing footage',
+      '编故事线': 'Drafting storyline',
+      '铺时间线': 'Building timeline',
+      '修改剪辑': 'Revising cut',
+      '渲染预览': 'Render preview',
+      '导出时间线': 'Exporting timeline',
+      '重新校验': 'Re-validate',
+      '手动编辑': 'Manual edit',
+      // 步骤
+      '素材': 'Footage',
+      '故事线': 'Storyline',
+      '时间线': 'Timeline',
+      '导出': 'Export',
+
+      // ---- 选文件夹
+      '选择背景音乐': 'Choose background music',
+      '新建项目：选择素材文件夹': 'New project: choose a footage folder',
+      '选择素材文件夹': 'Choose footage folder',
+      '↑ 上一级': '↑ Up',
+      '路径': 'Path',
+      '前往': 'Go',
+      '音乐文件的完整路径（mp3 / m4a / wav）': 'Full path to the music file (mp3 / m4a / wav)',
+      '比如': 'e.g.',
+      '项目名称（可留空，默认用文件夹名）': 'Project name (optional — defaults to the folder name)',
+      '使用这个文件': 'Use this file',
+      '开始扫描': 'Start scan',
+      '选择这个文件夹': 'Use this folder',
+      '这个文件夹里有 {0} 个视频': ['This folder has {0} video', 'This folder has {0} videos'],
+      '这里没有视频，进下一层看看': 'No videos here — try a subfolder',
+      '{0} 个视频': ['{0} video', '{0} videos'],
+      '这里没有子文件夹': 'No subfolders here',
+      '先填音乐文件路径': 'Enter the music file path first',
+      '浏览器拿不到文件路径：可以在资源管理器里按住 Shift 右键音乐文件，选“复制文件地址”，粘贴到下面。':
+        'Browsers can’t read file paths: in File Explorer, Shift + right-click the music file, choose “Copy as path”, and paste it below.',
+
+      // ---- 顶栏
+      '还没有项目': 'No projects yet',
+      '＋ 新建项目…': '＋ New project…',
+      'API Key 已就绪': 'API key ready',
+      '未设置 API Key': 'No API key',
+      'studio 正在用的 Key：{0}（{1} 位，来自 {2}）。点这里到设置页修改。': 'Key in use: {0} ({1} chars, from {2}). Click to change it in Settings.',
+      '还没有 API Key，只能用离线模拟。点这里到设置页填写。': 'No API key yet — only offline mock works. Click to add one in Settings.',
+      '运行日志': 'Activity log',
+      '设置': 'Settings',
+
+      // ---- 欢迎页
+      '把一堆素材，变成一个有故事的片子': 'Turn a pile of footage into a film with a story',
+      '选一个放着这趟旅行视频的文件夹（子文件夹也行）。AI 会逐个镜头看一遍，你写下想讲的故事，它用真实拍到的素材搭出结构，再剪成一条可以继续编辑的时间线。':
+        'Pick the folder with your trip videos (subfolders are fine). The AI watches every shot, you describe the story you want, and it builds a structure from what you actually filmed — then cuts it into a timeline you can keep editing.',
+
+      // ---- 1 素材
+      '扫描中…': 'Scanning…',
+      '看片中…': 'Analyzing…',
+      '开始分析': 'Start analysis',
+      '继续看片（还剩 {0} 个镜头）': ['Continue analysis ({0} shot left)', 'Continue analysis ({0} shots left)'],
+      '重新分析（只补新加的镜头）': 'Re-analyze new shots',
+      '处理进度': 'Progress',
+      '扫描元数据': 'Read metadata',
+      '切镜头 · 抽帧 · 打分': 'Split & score shots',
+      'AI 看片': 'AI shot logging',
+      '{0} 废片': '{0} unusable',
+      '同时转写人声（需要 faster-whisper）': 'Also transcribe speech (needs faster-whisper)',
+      '现在是离线模拟：AI 日志是假的，只用来测试流程。': 'Offline mock is on: the AI logs are fake, for testing only.',
+      '原片始终留在本机，只上传 512px 静帧和文字。中途停了也没关系，已完成的部分不会重复计费。':
+        'Your originals never leave this computer — only 512px stills and text are uploaded. You can stop anytime; finished work is never billed twice.',
+      '★ 精彩': '★ Highlight',
+      '必用': 'Must use',
+      '已排除': 'Excluded',
+      'AI 还没看过这个镜头': 'Not analyzed yet',
+      '找到 {0} 条素材': ['Found {0} clip', 'Found {0} clips'],
+      '还没有镜头': 'No shots yet',
+      '点左边的“开始分析”：切镜头、抽关键帧、打质量分，然后 AI 逐个镜头写日志——内容、情绪、景别和最佳片段。':
+        'Click “Start analysis” on the left: shots are split, keyframes extracted and scored, then the AI logs each shot — content, mood, shot size and the best moment.',
+      '第 {0} 天': 'Day {0}',
+      '{0} 个镜头': ['{0} shot', '{0} shots'],
+      '没有符合筛选条件的镜头': 'No shots match these filters',
+      '镜头日志': 'Shot log',
+      '点一个镜头，看 AI 写的日志。': 'Select a shot to see what the AI logged.',
+      '{0}–{1} 秒': '{0}–{1} s',
+      '最佳片段 {0}': 'Best moment {0}',
+      '第 {0} 帧': 'Frame {0}',
+      '景别': 'Shot size',
+      '情绪': 'Mood',
+      '精彩度': 'Highlight',
+      '地点': 'Place',
+      '画质': 'Quality',
+      '（偏模糊或过暗）': ' (soft or dark)',
+      '拍摄': 'Recorded',
+      '对白': 'Speech',
+      '无': 'None',
+      '标签': 'Tags',
+      '、': ', ',
+      '✓ 必用': '✓ Must use',
+      '标为必用': 'Mark as must-use',
+      '已排除（点击恢复）': 'Excluded (click to restore)',
+      '排除这个镜头': 'Exclude this shot',
+      '全部': 'All',
+      '素材文件夹': 'Footage folder',
+      '更换文件夹 / 重新扫描': 'Change folder / rescan',
+      '文件': 'Files',
+      '镜头': 'Shots',
+      '总时长': 'Total',
+      '按天浏览': 'Browse by day',
+      '搜索镜头日志': 'Search shot logs',
+      '搜索镜头日志：灯塔、退潮、车里聊天…': 'Search shot logs: lighthouse, low tide, chat in the car…',
+      '有对白': 'Has speech',
+      '竖屏': 'Vertical',
+      '隐藏废片': 'Hide unusable',
+      // 景别
+      '远景': 'Wide', '中景': 'Medium', '近景': 'Close-up', '特写': 'Detail', '自拍': 'Selfie',
+      '第一人称': 'POV', '航拍': 'Drone', '延时': 'Timelapse', '屏幕': 'Screen',
+
+      // ---- 2 故事线
+      '{0} 幕 · 约 {1} · 可以拖动排序，直接改文字': ['{0} beat · about {1} · drag to reorder, edit the text directly', '{0} beats · about {1} · drag to reorder, edit the text directly'],
+      '拖动排序': 'Drag to reorder',
+      '这一幕的标题': 'Beat title',
+      '约': 'about',
+      '秒数': 'Seconds',
+      '秒': 's',
+      '{0} 个候选镜头': ['{0} candidate shot', '{0} candidate shots'],
+      '这一幕要做什么': 'What this beat does',
+      '素材依据：': 'From the footage: ',
+      '上移': 'Move up',
+      '下移': 'Move down',
+      '删除这一幕': 'Delete this beat',
+      '删除': 'Delete',
+      '你想讲一个什么故事？': 'What story do you want to tell?',
+      '跟谁去的、这趟旅行意味着什么、想要什么感觉、结尾落在哪。用自己的话写就行。':
+        'Who you went with, what the trip meant, the feeling you want, where it should end. Your own words are fine.',
+      '故事描述': 'Story description',
+      '比如：和 James 从多伦多一路开到大西洋边，前半段热闹，越往东越安静，结尾停在傍晚的灯塔。':
+        'e.g. Driving with James from Toronto to the Atlantic — lively at first, quieter the further east we went, ending at a lighthouse at dusk.',
+      '成片长度': 'Length',
+      '{0} 分': '{0} min',
+      '自定': 'Custom',
+      '自定义分钟数': 'Custom length in minutes',
+      '画幅': 'Aspect ratio',
+      '横屏 16:9': 'Landscape 16:9',
+      '竖屏 9:16': 'Vertical 9:16',
+      '背景音乐（渲染时自动卡点，对白时自动压低）': 'Background music (cuts land on the beat; ducks under speech)',
+      '不加音乐': 'No music',
+      '移除': 'Remove',
+      '更换': 'Change',
+      '选择': 'Choose',
+      '重新生成故事线': 'Regenerate storyline',
+      '让 AI 提出分幕': 'Ask the AI for beats',
+      '需要先在“素材”里完成 AI 看片。': 'Finish AI shot logging in “Footage” first.',
+      '+ 加一幕': '+ Add beat',
+      '按这个结构剪 →': 'Cut to this structure →',
+      '故事线会出现在这里': 'Your storyline will appear here',
+      '在左边写下你想要的故事，AI 会对照你真实拍到的素材，给出一组可以编辑、排序、删除的分幕。':
+        'Describe the story you want on the left. The AI checks it against what you actually filmed and proposes beats you can edit, reorder and delete.',
+      '素材撑不起的部分': 'What the footage can’t support',
+      'AI 对照了你写的内容和实际拍到的东西，这些地方需要你决定。': 'The AI compared your description with what was filmed. These need your call.',
+      '没有发现明显的缺口。': 'No obvious gaps found.',
+      '生成故事线后显示。': 'Shown after the storyline is generated.',
+      '剪辑建议': 'Editor’s notes',
+      '已标记：{0} 个必用镜头，{1} 个排除镜头（排除的 AI 不会用）。': 'Marked: {0} must-use, {1} excluded (the AI won’t use excluded shots).',
+      '提示：录一段 5 分钟的语音回忆放进素材文件夹，开启转写后，AI 能找到更清楚的结构。':
+        'Tip: record a 5-minute voice memo about the trip, drop it in the footage folder and turn on transcription — the AI finds a much clearer structure.',
+      '新的一幕': 'New beat',
+
+      // ---- 3 时间线
+      'v{0}：{1} 个镜头，{2}': 'v{0}: {1} shots, {2}',
+      '改好了 → {0}': 'Done → {0}',
+      '按故事线剪了一版 → {0}': 'Cut from the storyline → {0}',
+      '用一句话改': 'Revise in a sentence',
+      '版本': 'Version',
+      '当前': 'current',
+      '还没有修改记录。': 'No revisions yet.',
+      '离线模拟听不懂修改要求，只会重新校验。': 'Offline mock can’t understand instructions — it only re-validates.',
+      '开头再有力一点': 'Make the opening stronger',
+      '少一些空镜': 'Fewer empty landscapes',
+      '第二段节奏再快点': 'Faster pace in the second part',
+      '去掉重复的镜头': 'Remove repeated shots',
+      '修改要求': 'Revision request',
+      '比如：结尾停在灯塔，不要回程': 'e.g. end at the lighthouse, skip the drive home',
+      '发送': 'Send',
+      '还没有时间线': 'No timeline yet',
+      '先在“故事线”里确认分幕，再按结构剪。': 'Confirm the beats in “Storyline” first, then cut to that structure.',
+      '去写故事线': 'Go to Storyline',
+      '还没有渲染预览': 'No preview rendered yet',
+      '预览是上一次渲染的，和当前时间线不一致': 'The preview is from an earlier render and doesn’t match the current timeline',
+      '点时间线上的镜头会跳到对应位置': 'Click a shot on the timeline to jump to it',
+      '重新渲染预览': 'Re-render preview',
+      '（无章节）': '(no chapter)',
+      '{0} 秒': '{0} s',
+      '保留原声': 'Keep original audio',
+      '原声静音': 'Original audio muted',
+      '没有背景音乐（在“故事线”里选择）': 'No background music (choose it in “Storyline”)',
+      '时间线是空的': 'The timeline is empty',
+      '镜头全长 {0} 秒': 'shot length {0} s',
+      '剪辑理由：': 'Why: ',
+      '入点（秒）': 'In (s)',
+      '出点（秒）': 'Out (s)',
+      '字幕': 'Caption',
+      '可留空': 'Optional',
+      '章节': 'Chapter',
+      '← 前移': '← Earlier',
+      '后移 →': 'Later →',
+      '删除镜头': 'Delete shot',
+      '有未保存的修改': 'Unsaved changes',
+      '放弃': 'Discard',
+      '保存': 'Save',
+      '保存并重新渲染': 'Save and re-render',
+      '已保存为新版本': 'Saved as a new version',
+
+      // ---- 4 导出
+      '还没有可以导出的时间线': 'Nothing to export yet',
+      '上次生成 {0}': 'Last generated {0}',
+      '把这一版带走': 'Take this cut with you',
+      '{0} 幕': ['{0} beat', '{0} beats'],
+      'MP4 预览': 'MP4 preview',
+      '带字幕、卡节拍、对白时音乐自动压低。硬切，不调色，适合快速看效果。长片建议跳过，直接导时间线去 Resolve 精修。':
+        'Captions, beat-synced cuts, music ducked under speech. Hard cuts, no grading — good for a quick look. For long films, skip this and export the timeline to Resolve.',
+      '清晰度': 'Resolution',
+      '竖屏 1080×1920': 'Vertical 1080×1920',
+      '音乐：': 'Music: ',
+      '无（在“故事线”里选择）': 'none (choose it in “Storyline”)',
+      '打开 preview.mp4': 'Open preview.mp4',
+      '渲染 preview.mp4': 'Render preview.mp4',
+      'Resolve / Premiere 时间线': 'Resolve / Premiere timeline',
+      '导出 timeline.xml，直接关联你的原片，接着在专业软件里精剪、调色、加转场。':
+        'Exports timeline.xml linked to your original files, so you can fine-tune, grade and add transitions in a real editor.',
+      '画面': 'Picture',
+      '原声（没保留的部分是静音，可以随时打开）': 'Original sound (unused parts muted — re-enable anytime)',
+      '音乐': 'Music',
+      '每幕的名字和 AI 的选片理由作为标记': 'Beat names and the AI’s reasoning as markers',
+      'Final Cut Pro 暂不支持': 'Final Cut Pro isn’t supported yet',
+      '下载': 'Download',
+      '导出 timeline.xml': 'Export timeline.xml',
+      '剪辑清单 story.json': 'Edit list story.json',
+      '纯文本 JSON，可以直接手改入点、出点、字幕。改完点“重新校验”，故事板和 XML 会一起更新。':
+        'Plain JSON — edit in/out points and captions by hand, then click “Re-validate” to update the storyboard and XML.',
+      '打开项目文件夹': 'Open project folder',
+      '分镜表': 'Storyboard',
+      '每个镜头的缩略图、选它的理由、它在成片里的位置。可以打印，也方便发给同行的人看。':
+        'Every shot with its thumbnail, why it was chosen and where it lands. Printable, and easy to share with travel companions.',
+      '打开 storyboard.html': 'Open storyboard.html',
+      '生成时间线后会自动出现': 'Appears once a timeline exists',
+      '版本历史': 'Version history',
+      '每一版都留着，随时可以回去。': 'Every version is kept — go back anytime.',
+      '恢复这一版': 'Restore this version',
+      '按故事线剪的版本': 'Cut from the storyline',
+      '恢复 v{0}': 'Restored v{0}',
+
+      // ---- 设置
+      '后端还是更新前的版本，没有设置接口。在运行 studio 的窗口按 Ctrl+C 停掉，重新运行 python -m vlogai.studio，再刷新这个页面。':
+        'The backend is still the old version without the settings API. Press Ctrl+C in the studio window, run python -m vlogai.studio again, then reload this page.',
+      '每 {0} 秒': 'every {0} s',
+      '关': 'off',
+      '读取设置失败': 'Couldn’t load settings',
+      '重试': 'Retry',
+      '正在读取设置…': 'Loading settings…',
+      '正在测试…': 'Testing…',
+      '✓ 连接成功': '✓ Connected',
+      '可用模型 {0} 个': ['{0} model available', '{0} models available'],
+      '你选的模型不在可用列表里：': 'These selected models aren’t available: ',
+      '当前：{0}（{1} 位，来自 {2}）': 'Current: {0} ({1} chars, from {2})',
+      '还没有 API Key，只能用离线模拟': 'No API key yet — only offline mock works',
+      '这些设置对所有项目生效，保存在 {0}。API Key 存在 .env，不会被提交到 git。':
+        'These settings apply to all projects and are saved in {0}. The API key lives in .env and is never committed to git.',
+      'API Key 与模型': 'API key & models',
+      'AI 看片和编故事用的都是 Anthropic 的模型。': 'Shot logging and story writing both use Anthropic models.',
+      '（想换就粘贴新的）': ' (paste a new one to replace it)',
+      '隐藏': 'Hide',
+      '显示': 'Show',
+      '测试连接': 'Test connection',
+      '保存到 {0}。在 {1} 创建。保存后下一个任务就会用新的 Key，不用重启。':
+        'Saved to {0}. Create one at {1}. The next task uses the new key — no restart needed.',
+      '看片模型': 'Shot logging model',
+      '每个镜头调用一次，镜头多时调用次数也多。选快一点、便宜一点的。': 'Called once per shot, so it adds up. Pick something fast and inexpensive.',
+      '编故事模型': 'Story model',
+      '分幕、剪时间线、一句话修改都用它。每次只调用一次，故事好不好主要看它。':
+        'Used for beats, timelines and revisions — one call each. It decides how good the story is.',
+      '字幕和日志的语言': 'Caption and log language',
+      '中文': 'Chinese',
+      '抽帧与切镜头': 'Keyframes & shots',
+      'AI 看不到视频，只看从每个镜头里抽出的几张静帧。帧越多看得越细，花费也越多。':
+        'The AI never sees video — only a few stills from each shot. More frames means a closer look and a higher cost.',
+      '抽帧间隔': 'Keyframe interval',
+      '每 {0} 秒一帧': 'one frame every {0} s',
+      '1 秒 · 看得最细': '1 s · most detail',
+      '默认 4 秒': 'default 4 s',
+      '10 秒 · 最省': '10 s · cheapest',
+      '每个镜头最多几帧': 'Max frames per shot',
+      '静帧尺寸': 'Still size',
+      '一个 12 秒的镜头': 'A 12-second shot',
+      '{0} 帧': ['{0} frame', '{0} frames'],
+      '每个镜头约': 'Per shot, about',
+      '500 个镜头约': '500 shots, about',
+      '估算：每张静帧约 {0} tokens，加上约 600 tokens 的提示和镜头信息。实际用量以每次任务结束时打印的数字为准。':
+        'Estimate: about {0} tokens per still plus ~600 tokens of prompt and shot info. The real usage is printed when each task finishes.',
+      '长于多少秒才切分镜头': 'Split clips longer than',
+      '短片段整条当一个镜头；长片段按画面变化切开，比如一段边走边拍的长视频。':
+        'Short clips stay one shot; long ones are split where the picture changes — e.g. a long walking video.',
+      '切镜头灵敏度': 'Split sensitivity',
+      '低': 'Low', '中': 'Medium', '高': 'High',
+      '高：画面稍有变化就切开，镜头更多更碎。需要装 PySceneDetect。': 'High: splits on small changes, giving more, shorter shots. Requires PySceneDetect.',
+      '废片判定': 'Unusable threshold',
+      '画质分 &lt; {0}': 'quality &lt; {0}',
+      '画质分低于这个值的镜头算“废片”：素材页可以隐藏，统计里单独列出。': 'Shots scoring below this are “unusable”: they can be hidden on the Footage page and are counted separately.',
+      '改了这里的设置，只对还没处理过的素材生效。想让已有项目按新设置重新抽帧，要删掉那个项目文件夹里的 shots.json 和 frames 文件夹再分析。':
+        'Changes here only affect footage not yet processed. To re-extract an existing project with new settings, delete shots.json and the frames folder in that project, then analyze again.',
+      '语音转写': 'Speech transcription',
+      '在本机把视频里说的话转成文字，AI 编故事时会参考。不上传音频。': 'Transcribes speech locally so the AI can use it for the story. Audio is never uploaded.',
+      '默认开启语音转写': 'Transcribe speech by default',
+      'Whisper 模型': 'Whisper model',
+      '最快': 'fastest', '较快': 'fast', '推荐': 'recommended', '最准，较慢': 'most accurate, slower',
+      '第一次使用某个模型时会自动下载。': 'Each model downloads automatically the first time it’s used.',
+      '{0}：在项目的虚拟环境里运行 {1}，然后重启 studio。': '{0}: run {1} in the project’s virtual environment, then restart studio.',
+      '还没安装 faster-whisper': 'faster-whisper isn’t installed',
+      '预览渲染': 'Preview rendering',
+      '只影响 preview.mp4。导出给 Resolve 的时间线始终链接原片。': 'Only affects preview.mp4. The timeline exported to Resolve always links your originals.',
+      '默认清晰度': 'Default resolution',
+      '720p · 快': '720p · fast',
+      '背景音乐音量': 'Music volume',
+      '剪辑点对齐音乐节拍': 'Snap cuts to the music beat',
+      '（每个剪辑点最多前后挪动 40%，有对白的片段不动；导出 XML 也按这个）': ' (each cut moves at most 40%; segments with speech never move; the XML follows the same cuts)',
+      '有人说话时自动压低音乐': 'Duck the music under speech',
+      '烧录字幕': 'Burn in captions',
+      '字幕字体': 'Caption font',
+      '自动：': 'Auto: ',
+      '没找到中文字体，请填写 .ttf/.ttc 路径': 'No CJK font found — enter a .ttf/.ttc path',
+      '改回自动': 'Back to auto',
+      '留空会自动找系统里的中文字体（微软雅黑、黑体、苹方）。': 'Leave empty to auto-detect a system CJK font (Microsoft YaHei, SimHei, PingFang).',
+      '性能与高级': 'Performance & advanced',
+      '同时处理几个镜头': 'Shots processed in parallel',
+      '抽帧和看片的并行数。4K 素材多时调高能快不少；遇到 API 限流（429）就调低。': 'Parallelism for keyframes and shot logging. Raise it for big 4K libraries; lower it if you hit API rate limits (429).',
+      '端口': 'Port',
+      '下次启动 studio 时生效（现在运行在 {0}）。被占用会自动换下一个。': 'Takes effect next time studio starts (running on {0} now). If taken, the next free port is used.',
+      '项目保存位置': 'Projects folder',
+      '打开文件夹': 'Open folder',
+      '现在用的是 {0}。改了要重启 studio 才生效，已有项目不会自动搬过去。': 'Currently {0}. Restart studio to apply; existing projects aren’t moved.',
+      '日志详细程度': 'Log detail',
+      '详细': 'Verbose', '含每个接口请求': 'includes every API request', '正常': 'Normal', '只记问题': 'Problems only',
+      '警告和报错': 'Warnings & errors',
+      '日志写在 {0}，同时显示在运行 studio 的终端里。右上角的 {1} 可以在网页里看。': 'Logs go to {0} and the terminal running studio. You can also read them in {1} (top right).',
+      'API 地址': 'API base URL',
+      '（一般不用改）': '(usually leave as is)',
+      '只有通过公司代理或网关访问时才需要填。填错会导致 401 或连不上。': 'Only needed behind a company proxy or gateway. A wrong value causes 401s or connection errors.',
+      '有 {0} 项修改还没保存': ['{0} unsaved change', '{0} unsaved changes'],
+      '所有设置都已保存': 'All settings saved',
+      '端口和项目位置要重启 studio 才生效': 'Port and projects folder apply after restarting studio',
+      '恢复默认': 'Reset to defaults',
+      '放弃修改': 'Discard changes',
+      '保存设置': 'Save settings',
+      '设置已保存': 'Settings saved',
+
+      // ---- 运行日志
+      '运行信息': 'Activity',
+      '只看报错': 'Errors only',
+      '有 {0} 条新报错': ['{0} new error', '{0} new errors'],
+      '有 {0} 条新警告': ['{0} new warning', '{0} new warnings'],
+      '显示哪些日志': 'Which entries to show',
+      '搜索日志': 'Search log',
+      '搜索：项目名、401、镜头 id…': 'Search: project, 401, shot id…',
+      '自动刷新': 'Auto-refresh',
+      '本次启动以来：{0} 条报错 · {1} 条警告': 'Since start: {0} errors · {1} warnings',
+      '日志文件：{0}（同样的内容也显示在运行 studio 的终端里）': 'Log file: {0} (the same output appears in the studio terminal)',
+      '刷新': 'Refresh',
+      '打开日志文件夹': 'Open log folder',
+      '正在读取…': 'Loading…',
+      '读取日志失败：{0}。如果刚更新过代码，请重启 studio。': 'Couldn’t read the log: {0}. If you just updated the code, restart studio.',
+      '没有符合条件的日志。': 'No matching entries.',
+
+      // ---- 对话框和提示
+      '恢复 v{0}？': 'Restore v{0}?',
+      '当前版本不会丢，恢复会另存成一个新版本。': 'The current version is kept; restoring saves a new version.',
+      '恢复': 'Restore',
+      '已恢复 v{0}': 'Restored v{0}',
+      '恢复默认设置？': 'Reset settings to defaults?',
+      'API Key 不受影响，其他设置都回到默认值。': 'Your API key is kept; everything else goes back to defaults.',
+      '已恢复默认设置': 'Settings reset to defaults',
+      '开始 AI 看片？': 'Start AI shot logging?',
+      'AI 会逐个镜头看一遍，按镜头数计费；已经看过的镜头不会重复计费。': 'The AI looks at every shot and is billed per shot. Shots already logged are never billed again.',
+      '开始': 'Start',
+      '重新生成故事线？': 'Regenerate the storyline?',
+      '现在的分幕和你的修改会被替换。': 'The current beats and your edits will be replaced.',
+      '重新生成': 'Regenerate',
+      '按这个结构重新剪一版？': 'Cut a new version to this structure?',
+      '之前的版本都保留在版本历史里。': 'Earlier versions stay in the version history.',
+      '开始剪': 'Cut',
+      '放弃未保存的时间线修改？': 'Discard unsaved timeline changes?',
+      '切换项目会丢掉还没保存的修改。': 'Switching projects loses unsaved changes.',
+      '放弃并切换': 'Discard and switch',
+      '先放弃手动修改吗？': 'Discard your manual edits first?',
+      'AI 会在已保存的版本上修改，没保存的手动修改会丢掉。想留着的话先点“保存”。': 'The AI revises the saved version, so unsaved manual edits will be lost. Click “Save” first to keep them.',
+      '放弃并继续': 'Discard and continue',
+      '连不上 vlogai 后端': 'Can’t reach the vlogai backend',
+      '先在终端运行 {0}，再刷新这个页面。': 'Run {0} in a terminal, then reload this page.',
+    },
+  };
+
+  /* 后端返回的消息是中文的，这里把常见的几种翻成对应语言（不认识的原样显示）。 */
+  const PATTERNS = {
+    en: [
+      [/^已经有任务在跑：(.+?)(，等它结束再保存)?$/, (m) => `Another task is already running: ${tr(m[1])}`],
+      [/^找不到音乐文件：(.+)$/, 'Music file not found: $1'],
+      [/^找不到字体文件：(.+)$/, 'Font file not found: $1'],
+      [/^(\w+) 要在 (.+)–(.+) 之间$/, '$1 must be between $2 and $3'],
+      [/^(\w+) 需要是数字$/, '$1 must be a number'],
+      [/^(\w+) 只能是 (.+)$/, '$1 must be one of $2'],
+      [/^还没有镜头日志，先(跑|运行) describe$/, 'No shot logs yet — run the footage analysis first'],
+      [/^还没有 story\.json，先运行 story$/, 'No timeline yet — build a cut first'],
+      [/^story\.json 为空，先运行 story$/, 'The timeline is empty — build a cut first'],
+      [/^先运行 (scan|frames)$/, 'Scan and analyze the footage first'],
+      [/^(?:AuthError: )?API Key 无效（401）。程序用的是 (.+?)（(\d+) 位，来自 (.+?)）。.*$/,
+        'Invalid API key (401). Using $1 ($2 chars, from $3). Check the key is complete and not deleted — you can switch keys in Settings and retry.'],
+      [/^401：Key 无效。.*$/, '401: invalid key. Check it was copied in full and hasn’t been deleted in the console.'],
+      [/^还没有填 API Key$/, 'No API key entered yet'],
+      [/^没有安装 anthropic：(.+)$/, 'The anthropic package isn’t installed: $1'],
+      [/^没有设置 ANTHROPIC_API_KEY。.*$/, 'No ANTHROPIC_API_KEY — add one in Settings, or turn on offline mock.'],
+      [/^没有 v(\d+)$/, 'There is no v$1'],
+      [/^项目名无效$/, 'Invalid project name'],
+      [/^not found$/, 'Not found'],
+      [/^✓ 完成$/, '✓ Done'],
+      [/^✗ (.+)$/, (m) => `✗ ${trServer(m[1])}`],
+    ],
+  };
+
+  const KEY = 'vlogai.uilang';
+  let lang = 'zh';
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY));
+    if (saved && LANGS.some(([c]) => c === saved)) lang = saved;
+  } catch (e) { /* 无痕模式等：用默认 */ }
+
+  const missing = new Set();
+
+  function fill(s, args) {
+    return s.replace(/\{(\d+)\}/g, (m, i) => (args[i] !== undefined ? String(args[i]) : m));
+  }
+
+  function tr(key, ...args) {
+    if (key === undefined || key === null) return '';
+    key = String(key);
+    let s = key;
+    if (lang !== 'zh') {
+      const d = DICT[lang] || {};
+      if (Object.prototype.hasOwnProperty.call(d, key)) {
+        s = d[key];
+        if (Array.isArray(s)) s = s[Number(args[0]) === 1 ? 0 : 1];
+      } else if (/[一-鿿]/.test(key)) {
+        missing.add(key);
+      }
+    }
+    return args.length ? fill(s, args) : s;
+  }
+
+  function trServer(msg) {
+    if (!msg || lang === 'zh') return msg;
+    for (const [re, rep] of PATTERNS[lang] || []) {
+      const m = String(msg).match(re);
+      if (m) return typeof rep === 'function' ? rep(m) : String(msg).replace(re, rep);
+    }
+    return tr(msg);
+  }
+
+  window.tr = tr;
+  window.trServer = trServer;
+  window.I18N = {
+    LANGS, DICT, PATTERNS, missing,
+    get lang() { return lang; },
+    set(code) {
+      if (!LANGS.some(([c]) => c === code)) return;
+      lang = code;
+      try { localStorage.setItem(KEY, JSON.stringify(code)); } catch (e) { /* ignore */ }
+      document.documentElement.lang = code === 'zh' ? 'zh-CN' : code;
+    },
+    locale() { return lang === 'zh' ? 'zh-CN' : lang === 'en' ? 'en-US' : lang; },
+  };
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : lang;
+}());

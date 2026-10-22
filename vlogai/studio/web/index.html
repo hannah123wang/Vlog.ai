@@ -15,20 +15,23 @@
     <span>vlogai</span>
   </div>
   <label class="proj">
-    <span class="sr">项目</span>
-    <select id="projectSelect" aria-label="当前项目"></select>
+    <span class="sr" data-i18n="项目">项目</span>
+    <select id="projectSelect" aria-label="当前项目" data-i18n-aria="当前项目"></select>
   </label>
-  <nav class="steps" aria-label="步骤" id="steps"></nav>
+  <nav class="steps" aria-label="步骤" data-i18n-aria="步骤" id="steps"></nav>
   <div class="top-right">
-    <label class="mock" title="离线模拟：不调用 AI、不花钱，用来测试流程">
-      <input type="checkbox" id="mockToggle"> 离线模拟
+    <label class="langsel"><span class="sr" data-i18n="界面语言">界面语言</span>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/></svg>
+      <select id="uiLang"></select></label>
+    <label class="mock" title="离线模拟：不调用 AI、不花钱，用来测试流程" data-i18n-title="离线模拟：不调用 AI、不花钱，用来测试流程">
+      <input type="checkbox" id="mockToggle"> <span data-i18n="离线模拟">离线模拟</span>
     </label>
     <a href="#settings" class="pill" id="keyState" style="text-decoration:none"></a>
-    <a href="#logs" class="gear" id="logsBtn" aria-label="运行日志" title="运行日志" style="position:relative">
+    <a href="#logs" class="gear" id="logsBtn" aria-label="运行日志" title="运行日志" data-i18n-aria="运行日志" data-i18n-title="运行日志" style="position:relative">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h7"/><path d="M17 15v4M17 21h.01"/></svg>
       <span class="badge" id="logBadge" hidden></span>
     </a>
-    <a href="#settings" class="gear" id="gearBtn" aria-label="设置" title="设置">
+    <a href="#settings" class="gear" id="gearBtn" aria-label="设置" title="设置" data-i18n-aria="设置" data-i18n-title="设置">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </a>
   </div>
@@ -42,7 +45,7 @@
     <strong id="jobName"></strong>
     <span id="jobLast" class="job-last"></span>
     <button type="button" class="ghost sm" id="jobToggle">日志</button>
-    <button type="button" class="ghost sm" id="jobClose" aria-label="关闭">×</button>
+    <button type="button" class="ghost sm" id="jobClose" aria-label="关闭" data-i18n-aria="关闭">×</button>
   </div>
   <div class="bar" id="jobBar"><i id="jobFill"></i></div>
   <pre id="jobLog" class="job-log mono" hidden></pre>
@@ -50,6 +53,7 @@
 
 <dialog id="modal"><form method="dialog" id="modalBody"></form></dialog>
 
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
