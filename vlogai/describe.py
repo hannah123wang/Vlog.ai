@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from .common import Project, log, read_json, write_json
+from .llm import AuthError
 from .transcribe import speech_for
 
 SYSTEM = """You are an assistant editor logging raw travel-vlog footage.
@@ -47,7 +49,7 @@ def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4)
 
     def work(s: dict):
         speech = speech_for(project, s["clip_id"], s["start"], s["end"])
-        meta = {"file": s["src"].split("/")[-1], "day": s["day"], "recorded": s["created"],
+        meta = {"file": Path(s["src"]).name, "day": s["day"], "recorded": s["created"],
                 "gps": s["gps"], "duration": s["duration"], "quality": s["quality"],
                 "speech": bool(speech)}
         prompt = PROMPT.format(
@@ -56,6 +58,8 @@ def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4)
             speech=speech or "(none)", dur=round(s["duration"], 1), lang=lang)
         try:
             d = llm.describe(SYSTEM, prompt, [f["path"] for f in s["frames"]])
+        except AuthError:
+            raise                     # Key 不对：整步停下，不要假装“完成”
         except Exception as e:  # noqa: BLE001
             log(f"  {s['id']} 分析失败，稍后重跑会再试: {e}")
             return
@@ -72,8 +76,11 @@ def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4)
 
 def load_logged_shots(project: Project) -> list[dict]:
     """Shots merged with their AI log — the material the story step works from."""
+    excluded = set((read_json(project.root / "flags.json", {}) or {}).get("exclude", []))
     out = []
     for s in read_json(project.shots_json, []):
+        if s["id"] in excluded:          # 用户在界面里排除的镜头，AI 编故事时看不到
+            continue
         d = read_json(project.logs_dir / f"{s['id']}.json")
         if d:
             out.append({**s, "log": d})

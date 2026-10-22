@@ -18,7 +18,13 @@ FONT_CANDIDATES = [
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
 ]
+
+
+def _ff_path(path) -> str:
+    """ffmpeg 滤镜里的路径：统一正斜杠，转义盘符冒号和引号（否则 Windows 上字幕会让渲染失败）。"""
+    return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
 def find_font(user_font: str | None = None) -> str | None:
@@ -57,7 +63,7 @@ def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
         txt = tmp / f"seg_{i:04d}.txt"
         txt.write_text(t["text"], encoding="utf-8")
         fs = int(H * 0.065)
-        vf += (f",drawtext=fontfile='{font}':textfile='{txt}':fontsize={fs}:fontcolor=white:"
+        vf += (f",drawtext=fontfile='{_ff_path(font)}':textfile='{_ff_path(txt)}':fontsize={fs}:fontcolor=white:"
                f"borderw=3:bordercolor=black@0.6:x=(w-text_w)/2:y=h*0.78:"
                f"alpha='if(lt(t,0.3),t/0.3,if(gt(t,{dur-0.4:.2f}),({dur:.2f}-t)/0.4,1))'")
     vf += "[v]"

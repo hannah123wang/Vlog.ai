@@ -42,7 +42,7 @@ def require_ffmpeg() -> None:
 
 def run(cmd: list[str], quiet: bool = True) -> subprocess.CompletedProcess:
     """Run a command; raise with stderr tail on failure."""
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if res.returncode != 0:
         tail = "\n".join(res.stderr.strip().splitlines()[-15:])
         raise RuntimeError(f"Command failed: {' '.join(cmd[:6])} ...\n{tail}")
