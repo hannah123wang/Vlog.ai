@@ -1,0 +1,32 @@
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 项目产物：每个人自己的素材和剪辑，不进仓库
+projects/
+test_footage/
+test_music.mp3
+*.mp4
+*.mov
+*.MP4
+*.MOV
+*.mp3
+*.wav
+
+# 密钥
+.env
+.env.local
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
