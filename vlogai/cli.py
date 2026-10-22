@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from . import describe, export_xml, frames, probe, render, story, storyboard, transcribe
@@ -68,6 +69,11 @@ def main(argv=None):
     add("export", "7 导出 Resolve/Premiere 时间线 XML")
 
     args = ap.parse_args(argv)
+    from . import applog, config
+    applog.setup(config.get("log_level"), console=False)   # print 照常上屏，同时写进 logs/vlogai.log
+    if not isinstance(sys.stdout, applog.TeeStdout):
+        sys.stdout = applog.TeeStdout(sys.stdout)
+    applog.log.info(f"命令行：vlogai {' '.join(argv if argv is not None else sys.argv[1:])}")
     require_ffmpeg()
     p = _project(args)
     o = _opts(args, p)

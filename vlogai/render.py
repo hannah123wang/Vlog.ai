@@ -85,13 +85,14 @@ def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
 
 def render(project: Project, music: str | None = None, vertical: bool = False, hd: bool = False,
            font: str | None = None, snap: bool = True, music_volume: float = 0.5,
-           workers: int = 2, out_name: str = "preview.mp4") -> Path:
+           workers: int = 2, out_name: str = "preview.mp4", captions: bool = True,
+           duck: bool = True) -> Path:
     tl = final_timeline(project, music, snap)
     clips = {c["path"]: c for c in read_json(project.clips_json, [])}
     W, H = (1080, 1920) if vertical else ((1920, 1080) if hd else (1280, 720))
     fps = 30
-    font = find_font(font)
-    if any(t.get("text") for t in tl) and not font:
+    font = find_font(font) if captions else None
+    if captions and any(t.get("text") for t in tl) and not font:
         log("  找不到中文字体，字幕将跳过（可用 --font 指定 .ttf/.ttc）")
     tmp = project.out("_render_tmp")
     shutil.rmtree(tmp, ignore_errors=True)
@@ -114,7 +115,8 @@ def render(project: Project, music: str | None = None, vertical: bool = False, h
         fc = ("[0:a]asplit=2[v1][v2];"
               f"[1:a]aresample=48000,aformat=channel_layouts=stereo,volume={music_volume}[m];"
               # duck the music whenever original sound/speech is playing
-              "[m][v1]sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400[md];"
+              + ("[m][v1]sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400[md];"
+                 if duck else "[v1]anullsink;[m]anull[md];") +
               f"[md]afade=t=in:d=1.5,afade=t=out:st={fade_st:.2f}:d=3[mf];"
               "[v2][mf]amix=inputs=2:duration=first:normalize=0[a]")
         run(["ffmpeg", "-y", "-v", "error", "-i", str(joined), "-stream_loop", "-1", "-i", music,

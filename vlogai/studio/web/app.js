@@ -12,6 +12,8 @@ const S = {
   tl: null, tlDirty: false, tsel: 0,
   job: null, jobLines: [], jobSince: 0, jobOpen: false, jobHidden: false,
   hd: false, whisper: false,
+  logs: null, logLevel: 'INFO', logQ: '', logAuto: true, logCounts: null,
+  cfg: null, cfgError: null, draft: null, cfgDirty: false, newKey: '', showKey: false, keyTest: null,
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -202,12 +204,15 @@ function renderHeader() {
   $('#steps').innerHTML = steps.map(([id, name, done], i) => `<a href="#${id}" ${S.page === id ? 'aria-current="page"' : ''}>
     ${done && S.page !== id ? '<span class="done">✓</span>' : `<span class="n">${i + 1}</span>`}${name}</a>`).join('');
   $('#mockToggle').checked = mockOn();
+  if (S.page === 'settings') $('#gearBtn').setAttribute('aria-current', 'page'); else $('#gearBtn').removeAttribute('aria-current');
+  if (S.page === 'logs') $('#logsBtn').setAttribute('aria-current', 'page'); else $('#logsBtn').removeAttribute('aria-current');
+  renderLogBadge();
   const k = $('#keyState');
   k.textContent = S.env.has_key ? 'API Key 已就绪' : '未设置 API Key';
   k.className = 'pill' + (S.env.has_key ? ' ok' : '');
   const kh = S.env.key || {};
-  k.title = S.env.has_key ? `studio 正在用的 Key：${kh.hint}（${kh.length} 位，来自 ${kh.source}）。改了 Key 要重启 studio。`
-    : '没有检测到 ANTHROPIC_API_KEY，只能用离线模拟。在项目根目录建 .env 写上 ANTHROPIC_API_KEY=… 然后重启 studio。';
+  k.title = S.env.has_key ? `studio 正在用的 Key：${kh.hint}（${kh.length} 位，来自 ${kh.source}）。点这里到设置页修改。`
+    : '还没有 API Key，只能用离线模拟。点这里到设置页填写。';
   if (S.env.has_key) k.textContent = `Key ${kh.hint}`;
 }
 
@@ -229,17 +234,20 @@ function renderJob() {
   log.textContent = S.jobLines.join('\n');
   if (atBottom) log.scrollTop = log.scrollHeight;
   $('#jobToggle').textContent = log.hidden ? '日志' : '收起';
+  if (j.status !== 'running') refreshLogSummary();
   if (j.status === 'done' && !S.jobOpen) { clearTimeout(renderJob.t); renderJob.t = setTimeout(() => { if (S.job && S.job.status === 'done' && !S.jobOpen) p.hidden = true; }, 4000); }
 }
 
 function render() {
   const page = (location.hash || '#footage').slice(1);
-  S.page = ['footage', 'story', 'timeline', 'export'].includes(page) ? page : 'footage';
+  S.page = ['footage', 'story', 'timeline', 'export', 'settings', 'logs'].includes(page) ? page : 'footage';
+  document.body.classList.toggle('on-settings', S.page === 'settings');
   renderHeader();
   const active = document.activeElement;
   const keep = active && active.id ? { id: active.id, a: active.selectionStart, b: active.selectionEnd } : null;
-  $('#app').innerHTML = !S.pid ? viewWelcome() : { footage: viewFootage, story: viewStory, timeline: viewTimeline, export: viewExport }[S.page]();
+  $('#app').innerHTML = S.page === 'settings' ? viewSettings() : S.page === 'logs' ? viewLogs() : !S.pid ? viewWelcome() : { footage: viewFootage, story: viewStory, timeline: viewTimeline, export: viewExport }[S.page]();
   if (S.pid && S.page === 'timeline') { renderTracks(); renderEditor(); renderSavebar(); }
+  if (S.page === 'logs') { renderLogRows(true); if (!S.logs) refreshLogs(); }
   if (keep) {
     const el = document.getElementById(keep.id);
     if (el) { el.focus(); try { if (keep.a != null) el.setSelectionRange(keep.a, keep.b); } catch (e) { /* not text */ } }
@@ -258,12 +266,13 @@ function shotDays() {
   for (const s of S.shots) (days[s.day] = days[s.day] || []).push(s);
   return Object.keys(days).map(Number).sort((a, b) => a - b).map((d) => ({ day: d, shots: days[d], date: (days[d][0].created || '').slice(5, 10).replace('-', '/') }));
 }
+const badQ = () => +((S.cfg && S.cfg.settings.bad_quality) ?? 0.25);
 function shotMatches(s) {
   const f = S.filters;
   if (f.star && !((s.highlight || 0) >= 7)) return false;
   if (f.talk && !s.speech) return false;
   if (f.vert && !s.vertical) return false;
-  if (f.hideBlur && s.quality != null && s.quality < 0.25) return false;
+  if (f.hideBlur && s.quality != null && s.quality < badQ()) return false;
   if (f.q) {
     const hay = [s.summary, s.place, s.activity, s.mood, s.speech, (s.tags || []).join(' '), s.file, s.id].join(' ').toLowerCase();
     if (!f.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
@@ -345,7 +354,7 @@ function detailHtml() {
       <dt>情绪</dt><dd>${esc(s.mood || '–')}</dd>
       <dt>精彩度</dt><dd>${s.highlight != null ? esc(s.highlight) + ' / 10' : '–'}</dd>
       <dt>地点</dt><dd>${esc(s.place || '–')}</dd>
-      <dt>画质</dt><dd>${s.quality != null ? `${(+s.quality).toFixed(2)}${s.quality < 0.25 ? '（偏模糊或过暗）' : ''}` : '–'}</dd>
+      <dt>画质</dt><dd>${s.quality != null ? `${(+s.quality).toFixed(2)}${s.quality < badQ() ? '（偏模糊或过暗）' : ''}` : '–'}</dd>
       <dt>拍摄</dt><dd>第 ${s.day} 天 ${esc(s.time)} · ${mmss(s.duration)}</dd>
       <dt>GPS</dt><dd>${gps}</dd>
       <dt>对白</dt><dd>${esc(s.speech || '无')}</dd>
@@ -667,6 +676,293 @@ function versionNote(n) {
   return n;
 }
 
+/* ---------------------------------------------------------------- 设置 */
+const MODEL_CHOICES = ['claude-haiku-4-5-20251001', 'claude-haiku-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
+const WHISPER = [['tiny', '最快'], ['base', '较快'], ['small', '推荐'], ['medium', '最准，较慢']];
+
+async function loadSettings() {
+  try {
+    S.cfg = await api('/api/settings');
+    S.cfgError = null;
+    if (!S.cfgDirty) S.draft = { ...S.cfg.settings };
+  } catch (e) {
+    S.cfgError = /not found|404/i.test(e.message)
+      ? '后端还是更新前的版本，没有设置接口。在运行 studio 的窗口按 Ctrl+C 停掉，重新运行 python -m vlogai.studio，再刷新这个页面。'
+      : e.message;
+  }
+}
+function cfgChanged() {
+  const a = S.cfg.settings, d = S.draft;
+  return Object.keys(d).filter((k) => String(d[k]) !== String(a[k])).length + (S.newKey ? 1 : 0);
+}
+function estimate() {
+  const d = S.draft;
+  const every = +d.frame_every_sec || 4, max = +d.max_frames_per_shot || 4, w = +d.frame_width || 512;
+  const perImage = Math.round((w * w * 9 / 16) / 750);
+  const f12 = Math.max(1, Math.min(max, Math.ceil(12 / every)));
+  const avg = Math.max(1, Math.min(max, Math.ceil(8 / every)));
+  const perShot = avg * perImage + 600;
+  const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + 'k' : String(n));
+  return { perImage, f12, perShot: fmt(perShot), p500: fmt(perShot * 500) };
+}
+function seg(key, opts, cols) {
+  return `<div class="seg" role="group" style="grid-template-columns:repeat(${cols || opts.length},minmax(0,1fr))">${opts.map(([v, label, sub]) =>
+    `<button type="button" data-set="${key}" data-val="${esc(v)}" aria-pressed="${String(S.draft[key]) === String(v)}">${esc(label)}${sub ? `<span style="display:block;font-size:11px;color:var(--muted)">${esc(sub)}</span>` : ''}</button>`).join('')}</div>`;
+}
+function navSubs() {
+  const d = S.draft;
+  return { api: '', frames: `每 ${d.frame_every_sec} 秒`, whisper: d.whisper ? d.whisper_model : '关', render: d.render_hd ? '1080p' : '720p', advanced: '' };
+}
+
+function viewSettings() {
+  if (!S.cfg) {
+    if (!S.cfgError) { setTimeout(async () => { await loadSettings(); if (S.page === 'settings') render(); }, 0); }
+    return `<div class="page"><div class="content">${S.cfgError
+      ? `<div class="empty"><h2>读取设置失败</h2><p class="err" style="max-width:560px;line-height:1.7;margin:0">${esc(S.cfgError)}</p>
+         <button type="button" class="btn" data-act="cfg-retry">重试</button></div>`
+      : '<p class="muted">正在读取设置…</p>'}</div></div>`;
+  }
+  const d = S.draft, c = S.cfg, k = c.key || {}, e = estimate();
+  const subs = navSubs();
+  const nav = [['api', 'API Key 与模型'], ['frames', '抽帧与切镜头'], ['whisper', '语音转写'], ['render', '预览渲染'], ['advanced', '性能与高级']];
+  const keyStatus = S.keyTest
+    ? (S.keyTest === 'testing' ? '<span class="muted">正在测试…</span>'
+      : S.keyTest.ok ? `<span class="ok-text">✓ 连接成功${S.keyTest.models && S.keyTest.models.length ? ` · 可用模型 ${S.keyTest.models.length} 个` : ''}</span>${S.keyTest.missing && S.keyTest.missing.length ? `<br><span class="bad-text">你选的模型不在可用列表里：${esc(S.keyTest.missing.join('、'))}</span>` : ''}`
+        : `<span class="bad-text">✗ ${esc(S.keyTest.reason)}</span>`)
+    : (k.has_key ? `<span class="muted">当前：${esc(k.hint)}（${k.length} 位，来自 ${esc(k.source)}）</span>` : '<span class="bad-text">还没有 API Key，只能用离线模拟</span>');
+  const models = [...new Set(MODEL_CHOICES.concat((S.keyTest && S.keyTest.models) || []).concat([d.describe_model, d.story_model]))];
+  const restart = (+d.port !== +c.settings.port || d.projects_dir !== c.settings.projects_dir);
+  const n = cfgChanged();
+  return `<div class="set-wrap">
+    <aside class="set-nav">
+      <h1 style="font-size:26px;margin:0 0 14px">设置</h1>
+      ${nav.map(([id, label]) => `<button type="button" data-scroll="${id}"><span>${label}</span><span class="sub" id="nav-${id}">${esc(subs[id])}</span></button>`).join('')}
+      <p class="help" style="margin-top:16px">这些设置对所有项目生效，保存在 <span class="mono">${esc(c.settings_file.split(/[\\/]/).pop())}</span>。API Key 存在 .env，不会被提交到 git。</p>
+    </aside>
+    <main class="set-main">
+
+    <section class="set-card" id="sec-api">
+      <div><h2>API Key 与模型</h2><p class="lead">AI 看片和编故事用的都是 Anthropic 的模型。</p></div>
+      <div class="set-row">
+        <label class="lbl" for="cfgKey">Anthropic API Key</label>
+        <div class="toolbar">
+          <input id="cfgKey" class="field mono" style="flex:1 1 320px;font-size:13px" type="${S.showKey ? 'text' : 'password'}" autocomplete="off" spellcheck="false"
+            value="${esc(S.newKey || '')}" placeholder="${k.has_key ? esc(k.hint) + '（想换就粘贴新的）' : 'sk-ant-api03-…'}">
+          <button type="button" class="ghost" data-act="toggle-key">${S.showKey ? '隐藏' : '显示'}</button>
+          <button type="button" class="ghost outline" data-act="test-key">测试连接</button>
+        </div>
+        <div style="font-size:13px;line-height:1.6" id="keyStatus">${keyStatus}</div>
+        <div class="help">保存到 <span class="mono">${esc(c.env_file)}</span>。在 <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> 创建。保存后下一个任务就会用新的 Key，不用重启。</div>
+      </div>
+      <datalist id="modelList">${models.map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
+      <div class="set-grid">
+        <div class="set-row"><label class="lbl" for="cfgM1">看片模型</label>
+          <input id="cfgM1" class="field mono" style="font-size:13px" list="modelList" data-cfg="describe_model" value="${esc(d.describe_model)}">
+          <div class="help">每个镜头调用一次，镜头多时调用次数也多。选快一点、便宜一点的。</div></div>
+        <div class="set-row"><label class="lbl" for="cfgM2">编故事模型</label>
+          <input id="cfgM2" class="field mono" style="font-size:13px" list="modelList" data-cfg="story_model" value="${esc(d.story_model)}">
+          <div class="help">分幕、剪时间线、一句话修改都用它。每次只调用一次，故事好不好主要看它。</div></div>
+      </div>
+      <div class="set-row"><div class="lbl">字幕和日志的语言</div><div style="max-width:340px">${seg('lang', [['zh', '中文'], ['en', 'English']])}</div></div>
+    </section>
+
+    <section class="set-card" id="sec-frames">
+      <div><h2>抽帧与切镜头</h2><p class="lead">AI 看不到视频，只看从每个镜头里抽出的几张静帧。帧越多看得越细，花费也越多。</p></div>
+      <div class="set-row">
+        <div class="lbl"><label for="cfgEvery">抽帧间隔</label><span class="val" id="everyVal">每 ${d.frame_every_sec} 秒一帧</span></div>
+        <input id="cfgEvery" type="range" min="1" max="10" step="1" data-cfg="frame_every_sec" value="${d.frame_every_sec}">
+        <div class="help" style="display:flex;justify-content:space-between"><span>1 秒 · 看得最细</span><span>默认 4 秒</span><span>10 秒 · 最省</span></div>
+      </div>
+      <div class="set-grid">
+        <div class="set-row"><div class="lbl">每个镜头最多几帧</div>${seg('max_frames_per_shot', [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6']])}</div>
+        <div class="set-row"><div class="lbl">静帧尺寸</div>${seg('frame_width', [[384, '384px'], [512, '512px'], [768, '768px']])}</div>
+      </div>
+      <div class="estimate" id="estimate">
+        <div><span>一个 12 秒的镜头</span><b>${e.f12} 帧</b></div>
+        <div><span>每个镜头约</span><b>${e.perShot} tokens</b></div>
+        <div><span>500 个镜头约</span><b>${e.p500} tokens</b></div>
+        <div class="help" style="grid-column:1/-1;color:var(--text2)">估算：每张静帧约 ${e.perImage} tokens，加上约 600 tokens 的提示和镜头信息。实际用量以每次任务结束时打印的数字为准。</div>
+      </div>
+      <div class="set-grid">
+        <div class="set-row"><label class="lbl" for="cfgLong">长于多少秒才切分镜头</label>
+          <div style="display:flex;align-items:center;gap:8px"><input id="cfgLong" class="field num" type="number" min="3" max="600" step="1" data-cfg="long_clip_sec" value="${d.long_clip_sec}"><span class="muted">秒</span></div>
+          <div class="help">短片段整条当一个镜头；长片段按画面变化切开，比如一段边走边拍的长视频。</div></div>
+        <div class="set-row"><div class="lbl">切镜头灵敏度</div>${seg('scene_sensitivity', [['low', '低'], ['mid', '中'], ['high', '高']])}
+          <div class="help">高：画面稍有变化就切开，镜头更多更碎。需要装 PySceneDetect。</div></div>
+      </div>
+      <div class="set-row">
+        <div class="lbl"><label for="cfgBad">废片判定</label><span class="val" id="badVal">画质分 &lt; ${(+d.bad_quality).toFixed(2)}</span></div>
+        <input id="cfgBad" type="range" min="0" max="0.6" step="0.05" data-cfg="bad_quality" value="${d.bad_quality}">
+        <div class="help">画质分低于这个值的镜头算“废片”：素材页可以隐藏，统计里单独列出。</div>
+      </div>
+      <div class="help" style="color:var(--accent);border-top:1px solid var(--line);padding-top:14px">改了这里的设置，只对还没处理过的素材生效。想让已有项目按新设置重新抽帧，要删掉那个项目文件夹里的 shots.json 和 frames 文件夹再分析。</div>
+    </section>
+
+    <section class="set-card" id="sec-whisper">
+      <div class="toolbar" style="justify-content:space-between;align-items:flex-start">
+        <div style="flex:1 1 300px"><h2>语音转写</h2><p class="lead">在本机把视频里说的话转成文字，AI 编故事时会参考。不上传音频。</p></div>
+        <button type="button" class="switch" role="switch" aria-checked="${!!d.whisper}" aria-label="默认开启语音转写" data-toggle="whisper"><i></i></button>
+      </div>
+      ${d.whisper ? `<div class="set-row"><div class="lbl">Whisper 模型</div>${seg('whisper_model', WHISPER.map(([v, s]) => [v, v, s]))}
+        <div class="help">${c.has_whisper ? '第一次使用某个模型时会自动下载。' : '<span class="bad-text">还没安装 faster-whisper</span>：在项目的虚拟环境里运行 <span class="mono">pip install faster-whisper</span>，然后重启 studio。'}</div></div>` : ''}
+    </section>
+
+    <section class="set-card" id="sec-render">
+      <div><h2>预览渲染</h2><p class="lead">只影响 preview.mp4。导出给 Resolve 的时间线始终链接原片。</p></div>
+      <div class="set-grid">
+        <div class="set-row"><div class="lbl">默认清晰度</div>${seg('render_hd', [[false, '720p · 快'], [true, '1080p']])}</div>
+        <div class="set-row"><div class="lbl"><label for="cfgVol">背景音乐音量</label><span class="val" id="volVal">${Math.round(d.music_volume * 100)}%</span></div>
+          <input id="cfgVol" type="range" min="0" max="1.5" step="0.05" data-cfg="music_volume" value="${d.music_volume}" style="margin-top:12px"></div>
+      </div>
+      <div class="section" style="gap:4px">
+        <label class="check"><input type="checkbox" data-cfg="beat_snap" ${d.beat_snap ? 'checked' : ''}>剪辑点对齐音乐节拍<span class="help">（每个剪辑点最多前后挪动 40%，有对白的片段不动；导出 XML 也按这个）</span></label>
+        <label class="check"><input type="checkbox" data-cfg="duck_music" ${d.duck_music ? 'checked' : ''}>有人说话时自动压低音乐</label>
+        <label class="check"><input type="checkbox" data-cfg="burn_captions" ${d.burn_captions ? 'checked' : ''}>烧录字幕</label>
+      </div>
+      <div class="set-row"><label class="lbl" for="cfgFont">字幕字体</label>
+        <div class="toolbar"><input id="cfgFont" class="field mono" style="flex:1 1 300px;font-size:13px" data-cfg="font" value="${esc(d.font)}" placeholder="${c.detected_font ? '自动：' + esc(c.detected_font) : '没找到中文字体，请填写 .ttf/.ttc 路径'}">
+          ${d.font ? '<button type="button" class="ghost" data-act="font-auto">改回自动</button>' : ''}</div>
+        <div class="help">留空会自动找系统里的中文字体（微软雅黑、黑体、苹方）。</div></div>
+    </section>
+
+    <section class="set-card" id="sec-advanced">
+      <div><h2>性能与高级</h2></div>
+      <div class="set-grid">
+        <div class="set-row"><label class="lbl" for="cfgWorkers">同时处理几个镜头</label>
+          <input id="cfgWorkers" class="field num" type="number" min="1" max="32" data-cfg="workers" value="${d.workers}">
+          <div class="help">抽帧和看片的并行数。4K 素材多时调高能快不少；遇到 API 限流（429）就调低。</div></div>
+        <div class="set-row"><label class="lbl" for="cfgPort">端口</label>
+          <input id="cfgPort" class="field num" type="number" min="1024" max="65535" data-cfg="port" value="${d.port}">
+          <div class="help">下次启动 studio 时生效（现在运行在 ${esc(c.running_port || '–')}）。被占用会自动换下一个。</div></div>
+      </div>
+      <div class="set-row"><label class="lbl" for="cfgProj">项目保存位置</label>
+        <div class="toolbar"><input id="cfgProj" class="field mono" style="flex:1 1 300px;font-size:13px" data-cfg="projects_dir" value="${esc(d.projects_dir)}">
+          <button type="button" class="ghost" data-act="open-projects">打开文件夹</button></div>
+        <div class="help">现在用的是 <span class="mono">${esc(c.projects_path)}</span>。改了要重启 studio 才生效，已有项目不会自动搬过去。</div></div>
+      <div class="set-row"><div class="lbl">日志详细程度</div>
+        <div style="max-width:520px">${seg('log_level', [['DEBUG', '详细', '含每个接口请求'], ['INFO', '正常', '推荐'], ['WARNING', '只记问题', '警告和报错']])}</div>
+        <div class="help">日志写在 <span class="mono">logs/vlogai.log</span>，同时显示在运行 studio 的终端里。右上角的 <a href="#logs">运行日志</a> 可以在网页里看。</div></div>
+      <div class="set-row"><label class="lbl" for="cfgBase">API 地址 <span class="help" style="font-weight:400">（一般不用改）</span></label>
+        <input id="cfgBase" class="field mono" style="font-size:13px" data-cfg="base_url" value="${esc(d.base_url)}" placeholder="https://api.anthropic.com">
+        <div class="help">只有通过公司代理或网关访问时才需要填。填错会导致 401 或连不上。</div></div>
+    </section>
+    </main>
+  </div>
+  <div class="set-save" id="setSave">${saveBarHtml(n, restart)}</div>`;
+}
+function saveBarHtml(n, restart) {
+  return `<span>${n ? `有 ${n} 项修改还没保存` : '所有设置都已保存'}${restart ? ' · <span style="color:var(--accent)">端口和项目位置要重启 studio 才生效</span>' : ''}</span>
+    <button type="button" class="ghost" data-act="cfg-reset">恢复默认</button>
+    ${n ? '<button type="button" class="ghost" data-act="cfg-discard">放弃修改</button>' : ''}
+    <button type="button" class="btn" data-act="cfg-save" ${n ? '' : 'disabled'}>保存设置</button>`;
+}
+function settingsLive() {
+  const d = S.draft, e = estimate(), subs = navSubs();
+  const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+  set('everyVal', `每 ${d.frame_every_sec} 秒一帧`);
+  set('badVal', `画质分 &lt; ${(+d.bad_quality).toFixed(2)}`);
+  set('volVal', `${Math.round(d.music_volume * 100)}%`);
+  const est = $('#estimate');
+  if (est) { const b = est.querySelectorAll('b'); b[0].textContent = `${e.f12} 帧`; b[1].textContent = `${e.perShot} tokens`; b[2].textContent = `${e.p500} tokens`; }
+  Object.entries(subs).forEach(([k, v]) => set('nav-' + k, esc(v)));
+  const c = S.cfg;
+  set('setSave', saveBarHtml(cfgChanged(), +d.port !== +c.settings.port || d.projects_dir !== c.settings.projects_dir));
+}
+function setDraft(key, raw) {
+  const def = S.cfg.defaults[key];
+  let v = raw;
+  if (typeof def === 'boolean') v = raw === true || raw === 'true';
+  else if (typeof def === 'number') v = raw === '' ? def : +raw;
+  S.draft[key] = v;
+  S.cfgDirty = cfgChanged() > 0;
+}
+async function saveSettingsPage() {
+  const changed = {};
+  for (const k of Object.keys(S.draft)) if (String(S.draft[k]) !== String(S.cfg.settings[k])) changed[k] = S.draft[k];
+  const body = { settings: changed };
+  if (S.newKey) body.api_key = S.newKey;
+  const r = await act(() => api('/api/settings', body));
+  if (!r) return;
+  S.cfg = r; S.draft = { ...r.settings }; S.cfgDirty = false; S.newKey = ''; S.keyTest = null;
+  S.env = { ...S.env, ...(await api('/api/env')) };
+  S.whisper = !!r.settings.whisper; S.hd = !!r.settings.render_hd;
+  render(); toast('设置已保存');
+}
+
+
+/* ---------------------------------------------------------------- 运行日志 */
+const LOG_LEVELS = [['DEBUG', '全部'], ['INFO', '运行信息'], ['WARNING', '警告和报错'], ['ERROR', '只看报错']];
+async function refreshLogs() {
+  try {
+    const d = await api(`/api/logs?${new URLSearchParams({ level: S.logLevel, q: S.logQ, limit: 800 })}`);
+    S.logs = d; S.logCounts = d.counts;
+    if (S.page === 'logs') { markLogsSeen(); renderLogRows(); renderLogBadge(); }
+  } catch (e) { S.logs = { entries: [], error: e.message, counts: {} }; if (S.page === 'logs') renderLogRows(); }
+}
+async function refreshLogSummary() {
+  try { S.logCounts = (await api('/api/logs/summary')).counts; renderLogBadge(); } catch (e) { /* 旧后端没有这个接口 */ }
+}
+function markLogsSeen() { if (S.logCounts) store('logseen', { started: S.logCounts.started, error: S.logCounts.error, warning: S.logCounts.warning }); }
+function renderLogBadge() {
+  const b = $('#logBadge'); if (!b) return;
+  const c = S.logCounts; if (!c) { b.hidden = true; return; }
+  const seen = store('logseen') || {};
+  const same = seen.started === c.started;
+  const err = c.error - (same ? seen.error || 0 : 0), warn = c.warning - (same ? seen.warning || 0 : 0);
+  if (S.page === 'logs' || (err <= 0 && warn <= 0)) { b.hidden = true; return; }
+  b.hidden = false;
+  b.className = 'badge' + (err > 0 ? '' : ' warn');
+  b.textContent = err > 0 ? (err > 99 ? '99+' : err) : (warn > 99 ? '99+' : warn);
+  $('#logsBtn').title = err > 0 ? `有 ${err} 条新报错` : `有 ${warn} 条新警告`;
+}
+function viewLogs() {
+  const c = S.logCounts || {};
+  return `<div class="logs-wrap">
+    <div class="logs-head">
+      <h1>运行日志</h1>
+      <div class="seg" role="group" aria-label="显示哪些日志" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+        ${LOG_LEVELS.map(([v, l]) => `<button type="button" data-loglevel="${v}" aria-pressed="${S.logLevel === v}">${l}</button>`).join('')}</div>
+      <label for="logSearch" class="sr">搜索日志</label>
+      <input id="logSearch" class="field" type="search" style="width:240px;min-height:38px" placeholder="搜索：项目名、401、镜头 id…" value="${esc(S.logQ)}">
+      <label class="check" style="min-height:38px"><input type="checkbox" id="logAuto" ${S.logAuto ? 'checked' : ''}>自动刷新</label>
+    </div>
+    <div class="logs-box" id="logBox"></div>
+    <div class="logs-foot">
+      <span>本次启动以来：<b style="color:var(--danger)">${c.error || 0}</b> 条报错 · <b style="color:var(--accent)">${c.warning || 0}</b> 条警告</span>
+      <span style="flex:1">日志文件：<span class="mono">${esc((S.logs && S.logs.file) || 'logs/vlogai.log')}</span>（同样的内容也显示在运行 studio 的终端里）</span>
+      <button type="button" class="ghost sm" data-act="logs-refresh">刷新</button>
+      <button type="button" class="ghost sm" data-act="logs-open">打开日志文件夹</button>
+    </div>
+  </div>`;
+}
+function logRowHtml(e) {
+  const lines = e.message.split('\n');
+  const first = lines[0], rest = lines.slice(1).join('\n');
+  const src = e.source === 'vlogai' ? '' : `<span style="color:var(--faint)">${esc(e.source)} </span>`;
+  return `<div class="lrow ${esc(e.level)}"><span class="t" title="${esc(e.time)}">${esc(e.time.slice(11))}</span><span class="lv">${esc(e.level === 'WARNING' ? 'WARN' : e.level)}</span>
+    <div class="m">${src}${rest ? `<details><summary>${esc(first)}</summary><pre>${esc(rest)}</pre></details>` : esc(first)}</div></div>`;
+}
+function renderLogRows(force) {
+  const box = $('#logBox'); if (!box) return;
+  if (!S.logs) { box.innerHTML = '<div class="muted" style="padding:16px">正在读取…</div>'; return; }
+  if (S.logs.error) { box.innerHTML = `<div class="err" style="margin:16px">读取日志失败：${esc(S.logs.error)}。如果刚更新过代码，请重启 studio。</div>`; return; }
+  const atBottom = force || box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+  const open = new Set([...box.querySelectorAll('details[open]')].map((d) => d.parentElement.parentElement.dataset.k));
+  box.innerHTML = S.logs.entries.length
+    ? S.logs.entries.map((e, i) => logRowHtml(e).replace('<div class="lrow', `<div data-k="${esc(e.time + i)}" class="lrow`)).join('')
+    : '<div class="muted" style="padding:16px">没有符合条件的日志。</div>';
+  box.querySelectorAll('[data-k]').forEach((r) => { if (open.has(r.dataset.k)) { const d = r.querySelector('details'); if (d) d.open = true; } });
+  if (atBottom) box.scrollTop = box.scrollHeight;
+  const foot = document.querySelector('.logs-foot span');
+  const c = S.logCounts || {};
+  if (foot) foot.innerHTML = `本次启动以来：<b style="color:var(--danger)">${c.error || 0}</b> 条报错 · <b style="color:var(--accent)">${c.warning || 0}</b> 条警告`;
+}
+setInterval(() => {
+  if (document.hidden) return;
+  if (S.page === 'logs' && S.logAuto && !(document.activeElement && document.activeElement.id === 'logSearch' && S.logTyping)) refreshLogs();
+}, 2000);
+setInterval(() => { if (!document.hidden && S.page !== 'logs') refreshLogSummary(); }, 10000);
+
 /* ---------------------------------------------------------------- actions */
 async function newProject() {
   const r = await browse('new', S.p ? S.p.footage : '');
@@ -717,6 +1013,10 @@ document.addEventListener('click', async (e) => {
     return tlChanged(true);
   }
   if (d.restore) return restore(+d.restore);
+  if (d.loglevel) { S.logLevel = d.loglevel; store('loglevel', S.logLevel); document.querySelectorAll('[data-loglevel]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.loglevel === S.logLevel)); return refreshLogs(); }
+  if (d.scroll) { const el = document.getElementById('sec-' + d.scroll); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  if (d.set) { setDraft(d.set, d.val); return render(); }
+  if (d.toggle) { setDraft(d.toggle, !S.draft[d.toggle]); return render(); }
   if (d.bmove || d.bdel != null) {
     const i = +t.closest('[data-beat]').dataset.beat;
     if (d.bmove) { const j = i + +d.bmove; [S.outline.beats[i], S.outline.beats[j]] = [S.outline.beats[j], S.outline.beats[i]]; }
@@ -726,6 +1026,25 @@ document.addEventListener('click', async (e) => {
 
   switch (d.act) {
     case 'new-project': return newProject();
+    case 'toggle-key': S.showKey = !S.showKey; return render();
+    case 'test-key': {
+      S.keyTest = 'testing'; render();
+      const r = await act(() => api('/api/settings/test', { api_key: S.newKey || undefined }));
+      S.keyTest = r || { ok: false, reason: '请求失败' }; return render();
+    }
+    case 'font-auto': setDraft('font', ''); return render();
+    case 'open-projects': await act(() => api('/api/settings/open_projects', {})); return;
+    case 'cfg-save': return saveSettingsPage();
+    case 'logs-refresh': return refreshLogs();
+    case 'logs-open': await act(() => api('/api/logs/open', {})); return;
+    case 'cfg-retry': S.cfgError = null; await loadSettings(); return render();
+    case 'cfg-discard': S.draft = { ...S.cfg.settings }; S.cfgDirty = false; S.newKey = ''; S.keyTest = null; return render();
+    case 'cfg-reset': {
+      if (!(await confirmBox('恢复默认设置？', 'API Key 不受影响，其他设置都回到默认值。', '恢复默认'))) return;
+      const r = await act(() => api('/api/settings', { reset: true }));
+      if (r) { S.cfg = r; S.draft = { ...r.settings }; S.cfgDirty = false; render(); toast('已恢复默认设置'); }
+      return;
+    }
     case 'rescan': {
       const r = await browse('video', S.p.footage);
       if (!r) return;
@@ -775,6 +1094,9 @@ document.addEventListener('click', async (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.id === 'fSearch') { S.filters.q = t.value; $('#fGrid').innerHTML = gridHtml(); return; }
+  if (t.id === 'logSearch') { S.logQ = t.value; clearTimeout(S.logT); S.logT = setTimeout(refreshLogs, 300); return; }
+  if (t.id === 'cfgKey') { S.newKey = t.value.trim(); S.keyTest = null; settingsLive(); return; }
+  if (t.dataset.cfg && t.type !== 'checkbox') { setDraft(t.dataset.cfg, t.value); settingsLive(); return; }
   if (t.dataset.bf) {
     const b = S.outline.beats[+t.closest('[data-beat]').dataset.beat];
     b[t.dataset.bf] = t.dataset.bf === 'seconds' ? Math.max(1, +t.value || 1) : t.value;
@@ -795,7 +1117,9 @@ document.addEventListener('change', async (e) => {
     return switchProject(t.value);
   }
   if (t.id === 'mockToggle') { store('mock', t.checked); return render(); }
+  if (t.dataset.cfg && t.type === 'checkbox') { setDraft(t.dataset.cfg, t.checked); settingsLive(); return; }
   if (t.id === 'fWhisper') { S.whisper = t.checked; return; }
+  if (t.id === 'logAuto') { S.logAuto = t.checked; return; }
   if (t.id === 'sBrief') { await act(() => saveSettings({ brief: t.value })); return; }
   if (t.id === 'sMinCustom' && t.value) { await act(() => saveSettings({ minutes: +t.value })); return render(); }
   if (t.id === 'tVersion') {
@@ -862,13 +1186,21 @@ document.addEventListener('dragend', () => { drag = null; document.querySelector
 
 $('#jobToggle').addEventListener('click', () => { S.jobOpen = $('#jobLog').hidden; renderJob(); if (!S.jobOpen) $('#jobLog').hidden = true; });
 $('#jobClose').addEventListener('click', () => { S.jobHidden = true; S.jobOpen = false; $('#jobPanel').hidden = true; });
-window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', async () => {
+  if (location.hash === '#settings' && !S.cfgDirty) await loadSettings();
+  if (location.hash === '#logs') { S.logs = null; }
+  render(); window.scrollTo(0, 0);
+});
 window.addEventListener('beforeunload', (e) => { if (S.tlDirty) { e.preventDefault(); e.returnValue = ''; } });
 
 /* ---------------------------------------------------------------- 启动 */
 (async function boot() {
   try {
     S.env = { drives: [], ...(await api('/api/env')) };
+    await loadSettings();
+    S.logLevel = store('loglevel') || 'INFO';
+    refreshLogSummary();
+    if (S.cfg) { S.whisper = !!S.cfg.settings.whisper; S.hd = !!S.cfg.settings.render_hd; }
     await loadProjects();
     const want = store('project');
     S.pid = S.projects.some((p) => p.id === want) ? want : (S.projects[0] || {}).id || null;
