@@ -1,0 +1,73 @@
+version_number: v 1.0
+
+2026 Oct 21
+embedding ui
+
+== 1. 新界面（vlogai/studio/web/） ==
+- 按设计稿重做网页界面：素材 → 故事线 → 时间线 → 导出 四个页面，深色剪辑软件风格
+- 素材页：按天分组的镜头卡片、搜索和筛选（精彩 / 有对白 / 竖屏 / 隐藏废片）、镜头日志详情（多帧切换、最佳片段、GPS、对白、标签）、标为“必用”或“排除”
+- 故事线页：写故事描述、选时长 / 画幅 / 背景音乐；分幕可直接改文字、拖动排序、增删；右侧列出“素材撑不起的部分”和剪辑建议；未确认的分幕修改会作为草稿保存在浏览器里
+- 时间线页：预览播放器、按章节分组的 V1 / A1 / A2 轨道、点镜头跳到对应位置、拖动换顺序、改入点 / 出点 / 字幕 / 章节 / 是否保留原声、“用一句话改”和修改记录、版本切换
+- 导出页：渲染 MP4（720p / 1080p）、导出 timeline.xml、打开分镜表、重新校验、版本历史和一键恢复
+
+== 2. 后端接口（vlogai/studio/server.py，详见 API.md） ==
+- 新增：GET /api/projects/{id}/versions，POST .../restore、.../flag、.../settings、.../open_folder、.../recheck
+- /api/projects/{id}/shots 增加 frames、created、gps、has_audio、vertical、tags、best_moment、must、excluded 等字段
+- /api/projects/{id} 增加 path、has_storyboard、mtimes、versions、flags；/api/env 增加 Windows 盘符列表
+- 保存时间线（POST .../timeline）每次存成一个新版本，并支持字幕、原声、章节
+- 修复：在时间线里改了某个镜头的入点再保存，这个镜头会被悄悄删掉
+- 修复：离线模拟模式下，编辑过的分幕在“按这个结构剪”时没有保存
+- 排除的镜头不会再交给 AI 编故事（describe.load_logged_shots）
+
+== 3. Windows 兼容 ==
+- 修复：带字幕的片段让 ffmpeg 渲染失败（字体和字幕文件路径里的 C: 没有转义）（render.py）
+- 修复：ffprobe / ffmpeg 输出中文时乱码（common.py 按 UTF-8 读取）
+- 修复：Windows 路径下取文件名出错（describe.py）
+- 字幕字体增加 C:/Windows/Fonts/simhei.ttf 作为备选
+
+== 4. API Key ==
+- 支持项目根目录的 .env 文件，优先于系统环境变量（避免旧窗口或 setx 留下的旧值干扰）
+- 自动去掉复制时带进来的空格、引号
+- 启动时和每个任务开始时显示正在用的 Key（只显示开头和结尾几位）、来源和 API 地址
+- Key 无效（401）时立刻停止并说明原因，不再重试多次后显示“完成”（llm.AuthError）
+
+== 5. 设置页（新增 vlogai/config.py） ==
+- 右上角齿轮进入；设置保存在 vlogai_settings.json（只记和默认值不同的项），Key 保存在 .env
+- 可调：API Key（含“测试连接”，不花钱）、看片模型、编故事模型、字幕和日志语言
+- 可调：抽帧间隔、每个镜头最多几帧、静帧尺寸、长于多少秒才切镜头、切镜头灵敏度、废片阈值（并实时估算 tokens 用量）
+- 可调：语音转写开关和 Whisper 模型、默认清晰度、音乐音量、是否卡点、是否压低音乐、是否烧录字幕、字幕字体
+- 可调：并行数、端口、项目保存位置、API 地址、日志详细程度
+- frames.py / render.py / llm.py / server.py 改为从设置读取参数；改完下一个任务就生效（端口和项目位置需重启）
+- 设置读取失败时显示原因和“重试”，不再一直停在“正在读取设置…”
+
+== 6. 日志系统（新增 vlogai/applog.py） ==
+- 终端实时显示运行信息和报错（警告黄色、报错红色），任务运行时也能看到
+- 同时写入 logs/vlogai.log（超过 5MB 自动换新文件，最多保留 5 个）；命令行模式的输出也会写入
+- 启动时记录环境：Python 版本和路径（不在虚拟环境里会提醒）、设置、ffmpeg 位置、Key
+- 记录每个任务的开始、进度、完成用时；接口出错时记录完整的错误堆栈
+- 网页新增“运行日志”页面：按级别筛选、搜索、展开错误堆栈、自动刷新；有新报错时右上角按钮显示数字
+- 设置页可选日志详细程度：详细（含每个接口请求）/ 正常 / 只记问题
+- 修复：pipeline 用 SystemExit 报错时（如“还没有镜头日志”），任务会永远停在“运行中”，之后其他任务也无法启动
+
+== 7. 界面多语言（新增 vlogai/studio/web/i18n.js） ==
+- 支持简体中文和 English，右上角下拉框或设置页“界面”切换，记在浏览器里
+- 所有按钮、提示、对话框、占位文字、悬停提示和读屏标签都会切换；英文区分单复数、按英文语序排列
+- 后端的任务名和常见报错也会翻译；AI 写的内容和运行日志保持原样
+- 加新语言只需在 i18n.js 里补一份“中文原文 → 译文”的对照表
+
+== 新增文件 ==
+vlogai/config.py
+vlogai/applog.py
+vlogai/studio/web/i18n.js
+
+== 修改的文件 ==
+API.md
+.gitignore（新增 vlogai_settings.json、logs/）
+vlogai/common.py、describe.py、render.py、frames.py、llm.py、cli.py
+vlogai/studio/server.py、jobs.py、__main__.py
+vlogai/studio/web/index.html、app.js、style.css
+
+== 升级注意 ==
+- 更新代码后要重启 studio（Ctrl+C 后重新运行 python -m vlogai.studio），只改网页文件时刷新页面即可
+- 启动时不用再写 --port，默认用设置页里的端口（8765）
+- .env、vlogai_settings.json、logs/ 都是本机文件，不会被提交到 git

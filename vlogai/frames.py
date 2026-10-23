@@ -8,16 +8,20 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import config
 from .common import Project, log, read_json, run, write_json
 
-LONG_CLIP_SEC = 20.0      # only run scene detection on clips longer than this
-MAX_FRAMES_PER_SHOT = 4
-FRAME_EVERY_SEC = 4.0     # roughly one keyframe every N seconds of a shot
+# 默认值在 config.DEFAULTS，界面“设置”页可以改：
+#   long_clip_sec        长于这个时长的片段才做切镜头
+#   max_frames_per_shot  每个镜头最多抽几帧
+#   frame_every_sec      大约每隔几秒抽一帧
+#   frame_width          静帧宽度（发给 AI 的就是它）
+#   scene_sensitivity    切镜头灵敏度 low/mid/high
 
 
 def _detect_scenes(path: str, duration: float) -> list[tuple[float, float]]:
     """Return [(start, end)] seconds. Falls back to one shot if PySceneDetect is missing."""
-    if duration < LONG_CLIP_SEC:
+    if duration < float(config.get("long_clip_sec")):
         return [(0.0, duration)]
     try:
         from scenedetect import ContentDetector, SceneManager, open_video
@@ -27,7 +31,7 @@ def _detect_scenes(path: str, duration: float) -> list[tuple[float, float]]:
         video = open_video(path)
         sm = SceneManager()
         sm.auto_downscale = True
-        sm.add_detector(ContentDetector(threshold=27.0, min_scene_len=int(video.frame_rate * 2)))
+        sm.add_detector(ContentDetector(threshold=config.SCENE_THRESHOLDS[config.get("scene_sensitivity")], min_scene_len=int(video.frame_rate * 2)))
         sm.detect_scenes(video, frame_skip=2, show_progress=False)
         scenes = [(s.get_seconds(), e.get_seconds()) for s, e in sm.get_scene_list()]
     except Exception as e:  # noqa: BLE001 — never let one odd file kill the run
@@ -36,13 +40,13 @@ def _detect_scenes(path: str, duration: float) -> list[tuple[float, float]]:
     return scenes or [(0.0, duration)]
 
 
-def _grab_frame(src: str, t: float, dst: Path) -> bool:
+def _grab_frame(src: str, t: float, dst: Path, width: int = 512) -> bool:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         return True
     try:
         run(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", src,
-             "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "4", str(dst)])
+             "-frames:v", "1", "-vf", f"scale={int(width)}:-2", "-q:v", "4", str(dst)])
         return dst.exists()
     except RuntimeError:
         return False
@@ -86,6 +90,8 @@ def extract(project: Project, workers: int = 4) -> list[dict]:
     if not clips:
         raise SystemExit("先运行 scan")
     old = {s["id"]: s for s in (read_json(project.shots_json, []) or [])}
+    cfg = config.load()
+    every, max_n, width = float(cfg["frame_every_sec"]), int(cfg["max_frames_per_shot"]), int(cfg["frame_width"])
     log(f"切分镜头并抽取关键帧（{len(clips)} 条素材）…")
 
     def work(clip: dict) -> list[dict]:
@@ -96,12 +102,12 @@ def extract(project: Project, workers: int = 4) -> list[dict]:
                 shots.append(old[sid])
                 continue
             dur = en - st
-            n = max(1, min(MAX_FRAMES_PER_SHOT, math.ceil(dur / FRAME_EVERY_SEC)))
+            n = max(1, min(max_n, math.ceil(dur / every)))
             times = [st + dur * (i + 0.5) / n for i in range(n)]
             frames = []
             for i, t in enumerate(times):
                 p = project.frames_dir / clip["id"] / f"{sid}_{i}.jpg"
-                if _grab_frame(clip["path"], t, p):
+                if _grab_frame(clip["path"], t, p, width):
                     frames.append({"t": round(t, 2), "path": str(p)})
             shot = {"id": sid, "clip_id": clip["id"], "src": clip["path"],
                     "start": round(st, 3), "end": round(en, 3), "duration": round(dur, 3),
@@ -118,6 +124,6 @@ def extract(project: Project, workers: int = 4) -> list[dict]:
             if i % 25 == 0 or i == len(clips):
                 log(f"  {i}/{len(clips)} 条素材完成")
     write_json(project.shots_json, all_shots)
-    bad = sum(1 for s in all_shots if s["quality"] < 0.25)
+    bad = sum(1 for s in all_shots if s["quality"] < float(cfg["bad_quality"]))
     log(f"得到 {len(all_shots)} 个镜头（其中约 {bad} 个模糊/过暗）→ {project.shots_json.name}")
     return all_shots

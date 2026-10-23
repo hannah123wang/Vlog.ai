@@ -18,7 +18,13 @@ FONT_CANDIDATES = [
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
 ]
+
+
+def _ff_path(path) -> str:
+    """ffmpeg 滤镜里的路径：统一正斜杠，转义盘符冒号和引号（否则 Windows 上字幕会让渲染失败）。"""
+    return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
 def find_font(user_font: str | None = None) -> str | None:
@@ -57,7 +63,7 @@ def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
         txt = tmp / f"seg_{i:04d}.txt"
         txt.write_text(t["text"], encoding="utf-8")
         fs = int(H * 0.065)
-        vf += (f",drawtext=fontfile='{font}':textfile='{txt}':fontsize={fs}:fontcolor=white:"
+        vf += (f",drawtext=fontfile='{_ff_path(font)}':textfile='{_ff_path(txt)}':fontsize={fs}:fontcolor=white:"
                f"borderw=3:bordercolor=black@0.6:x=(w-text_w)/2:y=h*0.78:"
                f"alpha='if(lt(t,0.3),t/0.3,if(gt(t,{dur-0.4:.2f}),({dur:.2f}-t)/0.4,1))'")
     vf += "[v]"
@@ -79,13 +85,14 @@ def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
 
 def render(project: Project, music: str | None = None, vertical: bool = False, hd: bool = False,
            font: str | None = None, snap: bool = True, music_volume: float = 0.5,
-           workers: int = 2, out_name: str = "preview.mp4") -> Path:
+           workers: int = 2, out_name: str = "preview.mp4", captions: bool = True,
+           duck: bool = True) -> Path:
     tl = final_timeline(project, music, snap)
     clips = {c["path"]: c for c in read_json(project.clips_json, [])}
     W, H = (1080, 1920) if vertical else ((1920, 1080) if hd else (1280, 720))
     fps = 30
-    font = find_font(font)
-    if any(t.get("text") for t in tl) and not font:
+    font = find_font(font) if captions else None
+    if captions and any(t.get("text") for t in tl) and not font:
         log("  找不到中文字体，字幕将跳过（可用 --font 指定 .ttf/.ttc）")
     tmp = project.out("_render_tmp")
     shutil.rmtree(tmp, ignore_errors=True)
@@ -108,7 +115,8 @@ def render(project: Project, music: str | None = None, vertical: bool = False, h
         fc = ("[0:a]asplit=2[v1][v2];"
               f"[1:a]aresample=48000,aformat=channel_layouts=stereo,volume={music_volume}[m];"
               # duck the music whenever original sound/speech is playing
-              "[m][v1]sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400[md];"
+              + ("[m][v1]sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400[md];"
+                 if duck else "[v1]anullsink;[m]anull[md];") +
               f"[md]afade=t=in:d=1.5,afade=t=out:st={fade_st:.2f}:d=3[mf];"
               "[v2][mf]amix=inputs=2:duration=first:normalize=0[a]")
         run(["ffmpeg", "-y", "-v", "error", "-i", str(joined), "-stream_loop", "-1", "-i", music,

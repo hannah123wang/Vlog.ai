@@ -18,6 +18,7 @@ for every GET are in [`sample-data/`](./sample-data).
 | `GET /api/projects/{id}/shots` | `{shots:[…]}` — every shot with thumbnail URL and AI log |
 | `GET /api/projects/{id}/outline` | the beat structure |
 | `GET /api/projects/{id}/story` | the timeline, with thumbnails and running timecodes |
+| `GET /api/projects/{id}/versions` | `{versions:[{n, note, created, title, seconds, shots}]}` — newest first |
 | `GET /api/job?since=N` | current job; `since` = how many log lines you've already shown |
 | `GET /media/{id}/…` | thumbnails and `preview.mp4`; supports HTTP Range, so video scrubbing works |
 
@@ -38,6 +39,7 @@ All of these start a background job and return `{"started": "<action>"}` immedia
 | `POST /api/projects/{id}/revise` | `{instruction, minutes, mock}` — "stronger opening, fewer landscapes" |
 | `POST /api/projects/{id}/render` | `{music, vertical, hd}` — render preview.mp4 and export XML |
 | `POST /api/projects/{id}/export` | `{}` — export timeline.xml only |
+| `POST /api/projects/{id}/recheck` | `{}` — after hand-editing story.json: re-validate, rebuild storyboard + XML |
 
 One exception, synchronous because the UI needs the result immediately:
 
@@ -47,6 +49,22 @@ One exception, synchronous because the UI needs the result immediately:
 
 It replaces the timeline with exactly the segments you send, in that order — that's how the UI
 persists deletes, reorders and trims. Dropped segments are simply absent from the array.
+Send each segment's `i` (its index in the last `GET …/story`) so a trimmed `in` still finds its
+original; optional `text`, `keep_audio`, `chapter` are applied too. Every save becomes a new version.
+
+Other synchronous calls (return their result immediately):
+
+| Endpoint | Body | Returns |
+|---|---|---|
+| `POST /api/projects/{id}/restore` | `{n}` | restores version n as a new version; returns the story |
+| `POST /api/projects/{id}/flag` | `{shot, flag: "must"\|"exclude", on}` | `{flags:{must:[], exclude:[]}}` — excluded shots are hidden from every AI story step |
+| `POST /api/projects/{id}/settings` | any of `{brief, minutes, music, vertical, lang}` | `{settings}` |
+| `POST /api/projects/{id}/open_folder` | `{}` | opens the project folder in Explorer / Finder |
+
+`GET /api/projects/{id}/shots` also returns `frames` (all keyframe URLs), `created`, `gps`,
+`has_audio`, `vertical`, `tags`, `activity`, `best_moment`, `must`, `excluded`.
+`GET /api/projects/{id}` also returns `path`, `has_storyboard`, `mtimes`, `versions`, `flags`.
+`GET /api/env` also returns `drives` (Windows drive letters, for the folder picker).
 
 `mock: true` runs the whole flow with deterministic stand-ins instead of API calls. Use it for UI
 work; it costs nothing and needs no key.

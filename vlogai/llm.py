@@ -17,6 +17,97 @@ import re
 import time
 from pathlib import Path
 
+from . import config
+
+class AuthError(RuntimeError):
+    """API Key 不对：没必要重试，也没必要继续跑剩下的镜头。"""
+
+
+def _read_dotenv() -> dict:
+    """读项目根目录（当前工作目录）下的 .env，只认 KEY=VALUE 这种简单格式。"""
+    f = Path.cwd() / ".env"
+    out = {}
+    if f.is_file():
+        for line in f.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip().removeprefix("export ").strip()] = v.strip()
+    return out
+
+
+def _clean(key: str) -> str:
+    # 去掉复制时常带进来的空格、换行、引号（包括中文引号）
+    return (key or "").strip().strip("\"'“”‘’").strip()
+
+
+def api_key() -> tuple[str, str]:
+    """返回 (key, 来源)。项目里的 .env 优先于系统环境变量——这样不会被别的窗口/setx 留下的旧值干扰。"""
+    env_file = _read_dotenv()
+    if env_file.get("ANTHROPIC_API_KEY"):
+        return _clean(env_file["ANTHROPIC_API_KEY"]), f"{Path.cwd() / '.env'}"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return _clean(os.environ["ANTHROPIC_API_KEY"]), "环境变量 ANTHROPIC_API_KEY"
+    return "", ""
+
+
+def base_url() -> str:
+    return config.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL", "")
+
+
+def model_for(kind: str) -> str:
+    """kind = describe / story。设置页里选过的优先，其次环境变量，最后默认值。"""
+    key, env = f"{kind}_model", f"VLOGAI_{kind.upper()}_MODEL"
+    v = config.get(key)
+    if v != config.DEFAULTS[key]:
+        return v
+    return os.environ.get(env) or v
+
+
+def make_client(key: str | None = None, max_retries: int = 4):
+    import anthropic
+    key = _clean(key) if key else api_key()[0]
+    kw = {"api_key": key, "max_retries": max_retries}
+    if config.get("base_url"):
+        kw["base_url"] = config.get("base_url")
+    return anthropic.Anthropic(**kw)
+
+
+def test_key(key: str | None = None) -> dict:
+    """设置页“测试连接”：列一下模型（不产生费用）。"""
+    try:
+        import anthropic
+    except ImportError:
+        return {"ok": False, "reason": "没有安装 anthropic：pip install anthropic"}
+    if not (key or api_key()[0]):
+        return {"ok": False, "reason": "还没有填 API Key"}
+    try:
+        client = make_client(key, max_retries=0)
+        try:
+            ids = [m.id for m in client.models.list(limit=50).data]
+        except AttributeError:            # 很老的 SDK 没有 models.list
+            client.messages.create(model=model_for("describe"), max_tokens=1,
+                                   messages=[{"role": "user", "content": "hi"}])
+            ids = []
+        missing = [m for m in (model_for("describe"), model_for("story")) if ids and m not in ids]
+        return {"ok": True, "models": ids, "missing": missing}
+    except anthropic.AuthenticationError:
+        return {"ok": False, "reason": "401：Key 无效。检查是否复制完整、是否已在 console 里删除"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"{e.__class__.__name__}: {e}"}
+
+
+def key_hint() -> dict:
+    """给界面和日志看的 Key 摘要（不暴露完整 Key）。"""
+    key, src = api_key()
+    if not key:
+        return {"has_key": False, "hint": "", "source": "", "length": 0, "base_url": base_url()}
+    return {"has_key": True, "hint": f"{key[:14]}…{key[-4:]}", "length": len(key), "source": src,
+            "base_url": base_url(),
+            "looks_ok": key.startswith("sk-ant-") and " " not in key}
+
+
 DEFAULT_DESCRIBE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_STORY_MODEL = "claude-sonnet-5"
 
@@ -47,12 +138,18 @@ class ClaudeLLM:
             import anthropic
         except ImportError as e:
             raise SystemExit("请先 pip install anthropic") from e
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise SystemExit("没有设置 ANTHROPIC_API_KEY。先 export ANTHROPIC_API_KEY=sk-ant-...，"
-                             "或者加 --mock 先用离线模式测试流程。")
-        self.client = anthropic.Anthropic(max_retries=4)
-        self.describe_model = os.environ.get("VLOGAI_DESCRIBE_MODEL", DEFAULT_DESCRIBE_MODEL)
-        self.story_model = os.environ.get("VLOGAI_STORY_MODEL", DEFAULT_STORY_MODEL)
+        key, src = api_key()
+        if not key:
+            raise SystemExit("没有设置 ANTHROPIC_API_KEY。在项目根目录建一个 .env 文件写上 "
+                             "ANTHROPIC_API_KEY=sk-ant-...，或者加 --mock 先用离线模式测试流程。")
+        h = key_hint()
+        print(f"[vlogai] 使用 API Key {h['hint']}（{h['length']} 位，来自 {src}）"
+              + (f"，ANTHROPIC_BASE_URL={h['base_url']}" if h["base_url"] else ""))
+        self._auth_error = anthropic.AuthenticationError
+        self.client = make_client(key)
+        self.describe_model = model_for("describe")
+        self.story_model = model_for("story")
+        print(f"[vlogai] 模型：看片 {self.describe_model} · 编故事 {self.story_model}")
         self.usage = {"input_tokens": 0, "output_tokens": 0}
 
     def _call(self, model: str, system: str, content: list, max_tokens: int) -> str:
@@ -64,11 +161,15 @@ class ClaudeLLM:
                 self.usage["input_tokens"] += resp.usage.input_tokens
                 self.usage["output_tokens"] += resp.usage.output_tokens
                 return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+            except self._auth_error as e:
+                h = key_hint()
+                raise AuthError(f"API Key 无效（401）。程序用的是 {h['hint']}（{h['length']} 位，来自 "
+                                f"{h['source']}）。检查这个 Key 是否完整、是否已被删除；可以在设置页换一个 Key 再重试。") from e
             except Exception as e:  # noqa: BLE001
                 if attempt == 2:
                     raise
                 time.sleep(3 * (attempt + 1))
-                print(f"[vlogai] API 重试 ({e.__class__.__name__})")
+                print(f"[vlogai] API 重试 ({e.__class__.__name__}: {str(e)[:200]})")
         return ""
 
     def describe(self, system: str, prompt: str, image_paths: list[str]) -> dict:

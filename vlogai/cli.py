@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from . import describe, export_xml, frames, probe, render, story, storyboard, transcribe
+from . import __version__
 from .common import Project, log, require_ffmpeg
 from .llm import get_llm
 
@@ -33,6 +35,7 @@ def _opts(args, p: Project) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="vlogai", description="AI 旅行 vlog 粗剪工具（MVP）")
+    ap.add_argument("--version", action="version", version=f"vlogai {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add(name, help_, footage=False):
@@ -68,6 +71,12 @@ def main(argv=None):
     add("export", "7 导出 Resolve/Premiere 时间线 XML")
 
     args = ap.parse_args(argv)
+    from . import applog, config
+    applog.setup(config.get("log_level"), console=False)   # print 照常上屏，同时写进 logs/vlogai.log
+    if not isinstance(sys.stdout, applog.TeeStdout):
+        sys.stdout = applog.TeeStdout(sys.stdout)
+    log(f"vlogai 版本 {__version__}")
+    applog.log.info(f"命令行：vlogai {' '.join(argv if argv is not None else sys.argv[1:])}")
     require_ffmpeg()
     p = _project(args)
     o = _opts(args, p)
