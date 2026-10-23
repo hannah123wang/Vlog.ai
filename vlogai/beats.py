@@ -24,7 +24,7 @@ def detect_beats(music_path: str) -> list[float]:
 
 
 def snap_to_beats(timeline: list[dict], shot_len: dict[str, tuple[float, float]],
-                  beats: list[float]) -> list[dict]:
+                  beats: list[float], max_shift: float = 0.4) -> list[dict]:
     """Stretch/trim each b-roll segment (±40%) so its cut lands on the nearest beat.
     Segments with kept speech are never changed. Uses spare footage inside the shot."""
     if not beats:
@@ -35,8 +35,8 @@ def snap_to_beats(timeline: list[dict], shot_len: dict[str, tuple[float, float]]
         length = t["src_out"] - t["src_in"]
         if not t.get("keep_audio"):
             shot_start, shot_end = shot_len[t["shot_id"]]
-            lo = cur + max(0.8, length * 0.6)
-            hi = cur + min(length * 1.4, shot_end - t["src_in"])
+            lo = cur + max(0.8, length * (1 - max_shift))
+            hi = cur + min(length * (1 + max_shift), shot_end - t["src_in"])
             i = bisect.bisect_left(beats, lo)
             cands = [b for b in beats[max(0, i - 1): i + 8] if lo <= b <= hi]
             if cands:

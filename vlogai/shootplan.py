@@ -12,7 +12,7 @@ import base64
 import json
 from html import escape
 
-from . import sketch
+from . import config, sketch
 from .common import Project, log, read_json, write_json
 
 REFS_DIR = "plan_refs"          # 你给镜头附的参考图，存在项目文件夹的这个子目录里
@@ -83,7 +83,7 @@ Aim for {shots_per_day} shots per day — enough to cut from, few enough to actu
 
 def make_plan(project: Project, llm, brief: str, days: int, minutes: float,
               gear: str, lang: str) -> dict:
-    shots_per_day = 10 if minutes <= 3 else 16
+    shots_per_day = int(config.get("plan_shots_per_day") or 0) or (10 if minutes <= 3 else 16)
     log(f"AI 写拍摄脚本：{days} 天，目标成片 {minutes:.0f} 分钟…")
     vertical = bool(project.settings().get("vertical"))
     prompt = PLAN_PROMPT.format(brief=brief, days=days, minutes=minutes,

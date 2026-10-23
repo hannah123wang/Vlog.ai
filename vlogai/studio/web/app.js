@@ -958,9 +958,32 @@ function seg(key, opts, cols) {
   return `<div class="seg" role="group" style="grid-template-columns:repeat(${cols || opts.length},minmax(0,1fr))">${opts.map(([v, label, sub]) =>
     `<button type="button" data-set="${key}" data-val="${esc(v)}" aria-pressed="${String(S.draft[key]) === String(v)}">${esc(tr(label))}${sub ? `<span style="display:block;font-size:11px;color:var(--muted)">${esc(tr(sub))}</span>` : ''}</button>`).join('')}</div>`;
 }
+/* 设置页的通用小部件：数字框（带取值范围和“恢复默认”）、勾选框 */
+const CFG_LABELS = {};
+function defHint(key) {
+  const d = S.cfg.defaults[key];
+  return String(S.draft[key]) !== String(d)
+    ? `<button type="button" class="ghost sm" data-cfgdef="${key}" title="${esc(tr('恢复默认值 {0}', d))}">${esc(tr('默认 {0}', d))}</button>` : '';
+}
+function num(key, label, o = {}) {
+  CFG_LABELS[key] = label;
+  const r = (S.cfg.rules || {})[key] || [];
+  const id = 'cfg_' + key;
+  return `<div class="set-row"><label class="lbl" for="${id}">${tr(label)}</label>
+    <div class="numrow"><input id="${id}" class="field num" type="number" ${r.length === 2 && typeof r[0] === 'number' ? `min="${r[0]}" max="${r[1]}"` : ''} step="${o.step || 'any'}" data-cfg="${key}" value="${esc(S.draft[key])}">
+      ${o.unit ? `<span class="muted">${tr(o.unit)}</span>` : ''}${r.length === 2 && typeof r[0] === 'number' ? `<span class="help">${r[0]}–${r[1]}</span>` : ''}${defHint(key)}</div>
+    ${o.help ? `<div class="help">${o.help}</div>` : ''}</div>`;
+}
+function chk(key, label, help) {
+  CFG_LABELS[key] = label;
+  return `<label class="check"><input type="checkbox" data-cfg="${key}" ${S.draft[key] ? 'checked' : ''}>${tr(label)}${help ? `<span class="help">${help}</span>` : ''}</label>`;
+}
 function navSubs() {
   const d = S.draft;
-  return { ui: (I18N.LANGS.find(([c]) => c === I18N.lang) || [, ''])[1], api: '', frames: tr('每 {0} 秒', d.frame_every_sec), whisper: d.whisper ? d.whisper_model : tr('关'), render: d.render_hd ? '1080p' : '720p', advanced: '' };
+  return { ui: (I18N.LANGS.find(([c]) => c === I18N.lang) || [, ''])[1], api: '', frames: tr('每 {0} 秒', d.frame_every_sec),
+    protect: d.protect_enabled ? tr('最多 {0}%', Math.round(d.protect_max_share * 100)) : tr('关'),
+    edit: tr('长片 ≥ {0} 分', d.longform_min), whisper: d.whisper ? d.whisper_model : tr('关'),
+    render: `${d.render_hd ? '1080p' : '720p'} · ${d.render_fps}fps`, advanced: '' };
 }
 
 function viewSettings() {
@@ -973,7 +996,7 @@ function viewSettings() {
   }
   const d = S.draft, c = S.cfg, k = c.key || {}, e = estimate();
   const subs = navSubs();
-  const nav = [['ui', '界面'], ['api', 'API Key 与模型'], ['frames', '抽帧与切镜头'], ['whisper', '语音转写'], ['render', '预览渲染'], ['advanced', '性能与高级']];
+  const nav = [['ui', '界面'], ['api', 'API Key 与模型'], ['frames', '抽帧与切镜头'], ['protect', '关键画面保护'], ['edit', '剪辑节奏'], ['whisper', '语音转写'], ['render', '预览渲染'], ['advanced', '性能与高级']];
   const keyStatus = S.keyTest
     ? (S.keyTest === 'testing' ? `<span class="muted">${tr('正在测试…')}</span>`
       : S.keyTest.ok ? `<span class="ok-text">${tr('✓ 连接成功')}${S.keyTest.models && S.keyTest.models.length ? ' · ' + tr('可用模型 {0} 个', S.keyTest.models.length) : ''}</span>${S.keyTest.missing && S.keyTest.missing.length ? `<br><span class="bad-text">${tr('你选的模型不在可用列表里：')}${esc(S.keyTest.missing.join(tr('、')))}</span>` : ''}`
@@ -1009,7 +1032,7 @@ function viewSettings() {
           <button type="button" class="ghost outline" data-act="test-key">${tr('测试连接')}</button>
         </div>
         <div style="font-size:13px;line-height:1.6" id="keyStatus">${keyStatus}</div>
-        <div class="help">${tr('保存到 {0}。在 {1} 创建。保存后下一个任务就会用新的 Key，不用重启。', `<span class="mono">${esc(c.env_file)}</span>`, '<a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>')}</div>
+        <div class="help">${tr('保存到 {0}。在 {1} 创建。保存后下一个任务就会用新的 Key，不用重启。', `<span class="mono">${esc(c.env_file)}</span>`, '<a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a>')}</div>
       </div>
       <datalist id="modelList">${models.map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
       <div class="set-grid">
@@ -1027,11 +1050,11 @@ function viewSettings() {
       <div><h2>${tr('抽帧与切镜头')}</h2><p class="lead">${tr('AI 看不到视频，只看从每个镜头里抽出的几张静帧。帧越多看得越细，花费也越多。')}</p></div>
       <div class="set-row">
         <div class="lbl"><label for="cfgEvery">${tr('抽帧间隔')}</label><span class="val" id="everyVal">${tr('每 {0} 秒一帧', d.frame_every_sec)}</span></div>
-        <input id="cfgEvery" type="range" min="1" max="10" step="1" data-cfg="frame_every_sec" value="${d.frame_every_sec}">
+        <input id="cfgEvery" type="range" min="0.5" max="10" step="0.5" data-cfg="frame_every_sec" value="${d.frame_every_sec}">
         <div class="help" style="display:flex;justify-content:space-between"><span>${tr('1 秒 · 看得最细')}</span><span>${tr('默认 4 秒')}</span><span>${tr('10 秒 · 最省')}</span></div>
       </div>
       <div class="set-grid">
-        <div class="set-row"><div class="lbl">${tr('每个镜头最多几帧')}</div>${seg('max_frames_per_shot', [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6']])}</div>
+        <div class="set-row"><div class="lbl">${tr('每个镜头最多几帧')}</div>${seg('max_frames_per_shot', [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']])}</div>
         <div class="set-row"><div class="lbl">${tr('静帧尺寸')}</div>${seg('frame_width', [[384, '384px'], [512, '512px'], [768, '768px']])}</div>
       </div>
       <div class="estimate" id="estimate">
@@ -1045,14 +1068,67 @@ function viewSettings() {
           <div style="display:flex;align-items:center;gap:8px"><input id="cfgLong" class="field num" type="number" min="3" max="600" step="1" data-cfg="long_clip_sec" value="${d.long_clip_sec}"><span class="muted">${tr('秒')}</span></div>
           <div class="help">${tr('短片段整条当一个镜头；长片段按画面变化切开，比如一段边走边拍的长视频。')}</div></div>
         <div class="set-row"><div class="lbl">${tr('切镜头灵敏度')}</div>${seg('scene_sensitivity', [['low', '低'], ['mid', '中'], ['high', '高']])}
-          <div class="help">${tr('高：画面稍有变化就切开，镜头更多更碎。需要装 PySceneDetect。')}</div></div>
+          <div class="help">${tr('高：画面稍有变化就切开，镜头更多更碎。需要装 PySceneDetect。')} ${tr('已经切好的素材不会重新切，改了只对新加的素材生效。')}</div></div>
       </div>
       <div class="set-row">
         <div class="lbl"><label for="cfgBad">${tr('废片判定')}</label><span class="val" id="badVal">${tr('画质分 &lt; {0}', (+d.bad_quality).toFixed(2))}</span></div>
         <input id="cfgBad" type="range" min="0" max="0.6" step="0.05" data-cfg="bad_quality" value="${d.bad_quality}">
         <div class="help">${tr('画质分低于这个值的镜头算“废片”：素材页可以隐藏，统计里单独列出。')}</div>
       </div>
+      <details class="more" ${store('cfgMore.frames') ? 'open' : ''} data-more="frames"><summary>${tr('更多参数')}</summary>
+        <div class="set-grid">
+          ${num('min_clip_sec', '忽略短于多少秒的文件', { unit: '秒', step: 0.1, help: tr('误触录下的一两下会被跳过。') })}
+          ${num('min_scene_sec', '每个镜头至少多长', { unit: '秒', step: 0.5, help: tr('切镜头时不会切出比这更短的镜头。') })}
+        </div>
+        <div class="section" style="gap:4px">
+          ${chk('use_proxy', '先转成低分辨率代理再切镜头', tr('（推荐。4K 长视频快很多，切点基本一样）'))}
+          ${d.use_proxy ? chk('hwaccel', '转代理时尝试用显卡解码', tr('（不支持时会自动改用 CPU）')) : ''}
+        </div>
+        ${d.use_proxy ? `<div class="set-grid">
+          ${num('proxy_width', '代理宽度', { unit: 'px', step: 16 })}
+          ${num('proxy_fps', '代理每秒几帧', { unit: 'fps', step: 1, help: tr('越高越不容易漏掉很快的切换，转得也越慢。') })}
+        </div>` : ''}
+        <div class="set-grid">
+          ${num('sharp_ref', '清晰度基准', { step: 10, help: tr('清晰度达到这个值算满分。手机素材普遍偏软、被判成废片太多时调低。') })}
+          ${num('exposure_target', '理想亮度', { unit: '/255', step: 5, help: tr('平均亮度越接近它，曝光分越高。夜景多的旅行可以调低。') })}
+        </div>
+      </details>
       <div class="help" style="color:var(--accent);border-top:1px solid var(--line);padding-top:14px">${tr('改了这里的设置，只对还没处理过的素材生效。想让已有项目按新设置重新抽帧，要删掉那个项目文件夹里的 shots.json 和 frames 文件夹再分析。')}</div>
+    </section>
+
+    <section class="set-card" id="sec-protect">
+      <div class="toolbar" style="justify-content:space-between;align-items:flex-start">
+        <div style="flex:1 1 300px"><h2>${tr('关键画面保护')}</h2><p class="lead">${tr('AI 看片时判断出的重要镜头，剪片时一定保留；AI 漏掉会自动补回。你标的“必用”镜头不受这里的开关影响。')}</p></div>
+        <button type="button" class="switch" role="switch" aria-checked="${!!d.protect_enabled}" aria-label="${tr('开启关键画面保护')}" data-toggle="protect_enabled"><i></i></button>
+      </div>
+      ${d.protect_enabled ? `<div class="section" style="gap:4px">
+          ${chk('protect_faces', '主人公正脸')}
+          ${chk('protect_together', '关键人物同框')}
+          ${chk('protect_ending', '适合作结尾的镜头')}
+        </div>
+        <div class="set-grid">
+          ${num('protect_scenery', '风景分达到多少就保护', { unit: '/10', step: 1, help: tr('0 = 不按风景保护。') })}
+          ${num('protect_highlight', '精彩度达到多少就保护', { unit: '/10', step: 1, help: tr('0 = 不按精彩度保护。') })}
+        </div>
+        <div class="set-row"><div class="lbl"><label for="cfgShare">${tr('受保护镜头最多占成片')}</label><span class="val" id="shareVal">${Math.round(d.protect_max_share * 100)}%</span></div>
+          <input id="cfgShare" type="range" min="0.1" max="1" step="0.05" data-cfg="protect_max_share" value="${d.protect_max_share}">
+          <div class="help">${tr('超过就按优先级舍弃一部分（正脸 > 同框 > 风景 > 精彩 > 结尾）。太高 AI 就没什么可剪的了。')}</div></div>
+        <div class="set-row"><div class="lbl"><label for="cfgPq">${tr('画质低于多少不保护')}</label><span class="val" id="pqVal">${(+d.protect_min_quality).toFixed(2)}</span></div>
+          <input id="cfgPq" type="range" min="0" max="0.6" step="0.02" data-cfg="protect_min_quality" value="${d.protect_min_quality}">
+          <div class="help">${tr('糊成一片的镜头再重要也救不回来。')}</div></div>` : ''}
+    </section>
+
+    <section class="set-card" id="sec-edit">
+      <div><h2>${tr('剪辑节奏')}</h2><p class="lead">${tr('告诉 AI 剪多少段、每段大概多长。实际节奏还会看素材和你的故事描述。')}</p></div>
+      <div class="set-grid">
+        ${num('longform_min', '成片长于几分钟按长片剪', { unit: '分钟', step: 0.5, help: tr('短片：快节奏、只留精华；长片：镜头更舒展，保留更多旅程。') })}
+        ${num('short_seg_sec', '短片平均每段几秒', { unit: '秒', step: 0.5 })}
+        ${num('long_seg_sec', '长片平均每段几秒', { unit: '秒', step: 0.5 })}
+        ${num('plan_shots_per_day', '拍摄脚本每天几个镜头', { unit: '个', step: 1, help: tr('0 = 自动（成片 3 分钟以内 10 个，更长 16 个）。') })}
+      </div>
+      <div class="set-row"><div class="lbl"><label for="cfgSnap">${tr('对齐节拍时每段最多拉长 / 缩短')}</label><span class="val" id="snapVal">${Math.round(d.beat_snap_range * 100)}%</span></div>
+        <input id="cfgSnap" type="range" min="0" max="0.9" step="0.05" data-cfg="beat_snap_range" value="${d.beat_snap_range}">
+        <div class="help">${tr('只在“剪辑点对齐音乐节拍”打开时有用；有对白的片段不动。')}</div></div>
     </section>
 
     <section class="set-card" id="sec-whisper">
@@ -1072,7 +1148,7 @@ function viewSettings() {
           <input id="cfgVol" type="range" min="0" max="1.5" step="0.05" data-cfg="music_volume" value="${d.music_volume}" style="margin-top:12px"></div>
       </div>
       <div class="section" style="gap:4px">
-        <label class="check"><input type="checkbox" data-cfg="beat_snap" ${d.beat_snap ? 'checked' : ''}>${tr('剪辑点对齐音乐节拍')}<span class="help">${tr('（每个剪辑点最多前后挪动 40%，有对白的片段不动；导出 XML 也按这个）')}</span></label>
+        <label class="check"><input type="checkbox" data-cfg="beat_snap" ${d.beat_snap ? 'checked' : ''}>${tr('剪辑点对齐音乐节拍')}<span class="help">${tr('（每段最多拉长 / 缩短 {0}%，在“剪辑节奏”里改；有对白的片段不动；导出 XML 也按这个）', Math.round(d.beat_snap_range * 100))}</span></label>
         <label class="check"><input type="checkbox" data-cfg="duck_music" ${d.duck_music ? 'checked' : ''}>${tr('有人说话时自动压低音乐')}</label>
         <label class="check"><input type="checkbox" data-cfg="burn_captions" ${d.burn_captions ? 'checked' : ''}>${tr('烧录字幕')}</label>
       </div>
@@ -1080,6 +1156,16 @@ function viewSettings() {
         <div class="toolbar"><input id="cfgFont" class="field mono" style="flex:1 1 300px;font-size:13px" data-cfg="font" value="${esc(d.font)}" placeholder="${c.detected_font ? tr('自动：') + esc(c.detected_font) : tr('没找到中文字体，请填写 .ttf/.ttc 路径')}">
           ${d.font ? `<button type="button" class="ghost" data-act="font-auto">${tr('改回自动')}</button>` : ''}</div>
         <div class="help">${tr('留空会自动找系统里的中文字体（微软雅黑、黑体、苹方）。')}</div></div>
+      <div class="set-grid">
+        <div class="set-row"><div class="lbl">${tr('帧率')}</div>${seg('render_fps', [[24, '24'], [25, '25'], [30, '30'], [50, '50'], [60, '60']])}</div>
+        ${num('render_crf', '画质（CRF）', { step: 1, help: tr('越小越清晰、文件越大。18 接近无损，28 明显压缩。') })}
+        ${num('caption_size', '字幕字号', { unit: tr('% 画面高度'), step: 0.5 })}
+        ${num('caption_pos', '字幕位置', { unit: tr('% 从顶部算'), step: 1 })}
+        ${num('music_fade_in', '音乐淡入', { unit: '秒', step: 0.5 })}
+        ${num('music_fade_out', '音乐淡出', { unit: '秒', step: 0.5 })}
+        ${num('duck_ratio', '说话时音乐压低力度', { step: 1, help: tr('1 = 不压低，越大压得越狠。') })}
+        ${num('render_workers', '渲染时同时转几段', { step: 1, help: tr('电脑核心多可以调高；内存小的电脑别超过 4。') })}
+      </div>
     </section>
 
     <section class="set-card" id="sec-advanced">
@@ -1088,6 +1174,7 @@ function viewSettings() {
         <div class="set-row"><label class="lbl" for="cfgWorkers">${tr('同时处理几个镜头')}</label>
           <input id="cfgWorkers" class="field num" type="number" min="1" max="32" data-cfg="workers" value="${d.workers}">
           <div class="help">${tr('抽帧和看片的并行数。4K 素材多时调高能快不少；遇到 API 限流（429）就调低。')}</div></div>
+        ${num('api_retries', 'API 出错时重试几次', { step: 1, help: tr('只对超时、过载这类临时错误重试；Key 无效、余额不足不会重试。') })}
         <div class="set-row"><label class="lbl" for="cfgPort">${tr('端口')}</label>
           <input id="cfgPort" class="field num" type="number" min="1024" max="65535" data-cfg="port" value="${d.port}">
           <div class="help">${tr('下次启动 studio 时生效（现在运行在 {0}）。被占用会自动换下一个。', esc(c.running_port || '–'))}</div></div>
@@ -1122,6 +1209,9 @@ function settingsLive() {
   set('everyVal', tr('每 {0} 秒一帧', d.frame_every_sec));
   set('badVal', tr('画质分 &lt; {0}', (+d.bad_quality).toFixed(2)));
   set('volVal', `${Math.round(d.music_volume * 100)}%`);
+  set('shareVal', `${Math.round(d.protect_max_share * 100)}%`);
+  set('pqVal', (+d.protect_min_quality).toFixed(2));
+  set('snapVal', `${Math.round(d.beat_snap_range * 100)}%`);
   const est = $('#estimate');
   if (est) { const b = est.querySelectorAll('b'); b[0].textContent = tr('{0} 帧', e.f12); b[1].textContent = `${e.perShot} tokens`; b[2].textContent = `${e.p500} tokens`; }
   Object.entries(subs).forEach(([k, v]) => set('nav-' + k, esc(v)));
@@ -1139,6 +1229,14 @@ function setDraft(key, raw) {
 async function saveSettingsPage() {
   const changed = {};
   for (const k of Object.keys(S.draft)) if (String(S.draft[k]) !== String(S.cfg.settings[k])) changed[k] = S.draft[k];
+  for (const [k, v] of Object.entries(changed)) {           // 先在网页里检查范围，出错时说清楚是哪一项
+    const r = (S.cfg.rules || {})[k];
+    if (r && r.length === 2 && typeof r[0] === 'number' && (!Number.isFinite(+v) || +v < r[0] || +v > r[1])) {
+      toast(tr('“{0}”要在 {1}–{2} 之间', tr(CFG_LABELS[k] || k), r[0], r[1]), true);
+      const el = document.querySelector(`[data-cfg="${k}"]`); if (el) { el.closest('details') && (el.closest('details').open = true); el.focus(); }
+      return;
+    }
+  }
   const body = { settings: changed };
   if (S.newKey) body.api_key = S.newKey;
   const r = await act(() => api('/api/settings', body));
@@ -1284,6 +1382,7 @@ document.addEventListener('click', async (e) => {
   if (d.scroll) { const el = document.getElementById('sec-' + d.scroll); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   if (d.set) { setDraft(d.set, d.val); return render(); }
   if (d.toggle) { setDraft(d.toggle, !S.draft[d.toggle]); return render(); }
+  if (d.cfgdef) { setDraft(d.cfgdef, S.cfg.defaults[d.cfgdef]); return render(); }
   if (d.planday != null) { S.planDay = +d.planday; return render(); }
   if (d.prefadd != null) { const li = t.closest('[data-pday]'); return pickPlanRef(S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx].shot_id); }
   if (d.prefdel != null) {
@@ -1444,7 +1543,8 @@ document.addEventListener('change', async (e) => {
   }
   if (t.id === 'mockToggle') { store('mock', t.checked); return render(); }
   if (t.id === 'uiLang') return setUiLang(t.value);
-  if (t.dataset.cfg && t.type === 'checkbox') { setDraft(t.dataset.cfg, t.checked); settingsLive(); return; }
+  if (t.dataset.cfg && t.type === 'checkbox') { setDraft(t.dataset.cfg, t.checked); if (t.dataset.cfg === 'use_proxy') return render(); settingsLive(); return; }
+  if (t.dataset.cfg && t.type === 'number') { setDraft(t.dataset.cfg, t.value); return render(); }   // 失焦时刷新“默认 x”按钮
   if (t.id === 'fWhisper') { S.whisper = t.checked; return; }
   if (t.id === 'fSubject') { await act(() => saveSettings({ subject: t.value })); return; }
   if (t.id === 'pBrief' || t.id === 'pGear' || t.id === 'pDays') {
@@ -1521,6 +1621,9 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   addPlanRefs(S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx].shot_id, e.dataTransfer.files);
 });
+document.addEventListener('toggle', (e) => {     // “更多参数”展开状态记在浏览器里
+  const el = e.target; if (el.dataset && el.dataset.more) store('cfgMore.' + el.dataset.more, el.open);
+}, true);
 document.addEventListener('dragstart', (e) => {
   const b = e.target.closest && e.target.closest('[data-beat], [data-clip]');
   if (!b) return;

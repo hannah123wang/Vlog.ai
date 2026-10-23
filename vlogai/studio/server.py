@@ -378,7 +378,7 @@ def job_render(pid: str, music: str | None, vertical: bool, hd: bool):
     cfg = config.load()
     render.render(p, music=music or None, vertical=vertical, hd=hd, font=cfg["font"] or None,
                   snap=cfg["beat_snap"], music_volume=float(cfg["music_volume"]),
-                  captions=cfg["burn_captions"], duck=cfg["duck_music"])
+                  captions=cfg["burn_captions"], duck=cfg["duck_music"], workers=int(cfg["render_workers"]))
     export_xml.export_xml(p, music=music or None)
 
 
@@ -446,7 +446,10 @@ def settings_payload() -> dict:
             "settings_file": str(config.path()), "env_file": str(Path.cwd() / ".env"),
             "projects_path": str(PROJECTS), "detected_font": render.find_font(None) or "",
             "has_whisper": find_spec("faster_whisper") is not None,
-            "running_port": RUNNING.get("port")}
+            "running_port": RUNNING.get("port"),
+            # 每项的取值范围，网页保存前先检查，出错时能说出是哪一项
+            "rules": {k: ([r[1], r[2]] if isinstance(r, tuple) else sorted(r, key=str))
+                      for k, r in config._RULES.items()}}
 
 
 def _open_path(path: Path):

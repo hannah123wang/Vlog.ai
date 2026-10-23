@@ -200,7 +200,8 @@ class ClaudeLLM:
         self.usage = {"input_tokens": 0, "output_tokens": 0}
 
     def _call(self, model: str, system: str, content: list, max_tokens: int) -> str:
-        for attempt in range(3):
+        tries = 1 + int(config.get("api_retries"))      # 设置页：API 出错重试几次
+        for attempt in range(tries):
             try:
                 resp = self.client.messages.create(
                     model=model, max_tokens=max_tokens, system=system,
@@ -212,7 +213,7 @@ class ClaudeLLM:
                 fatal = fatal_from(e, model)
                 if fatal:
                     raise fatal from e
-                if attempt == 2 or isinstance(e, self._bad_request):   # 400：请求本身有问题，重试也一样
+                if attempt == tries - 1 or isinstance(e, self._bad_request):   # 400：请求本身有问题，重试也一样
                     raise
                 time.sleep(3 * (attempt + 1))
                 print(f"[vlogai] API 重试 ({e.__class__.__name__}: {str(e)[:200]})")

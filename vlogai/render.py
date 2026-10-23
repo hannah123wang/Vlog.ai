@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .beats import detect_beats, snap_to_beats
+from . import config
 from .common import Project, log, read_json, run, write_json
 
 FONT_CANDIDATES = [
@@ -42,13 +43,13 @@ def final_timeline(project: Project, music: str | None, snap: bool = True) -> li
     tl = story["timeline"]
     if music and snap:
         shots = {s["id"]: (s["start"], s["end"]) for s in read_json(project.shots_json, [])}
-        tl = snap_to_beats(tl, shots, detect_beats(music))
+        tl = snap_to_beats(tl, shots, detect_beats(music), float(config.get("beat_snap_range")))
     write_json(project.out("timeline_final.json"), tl)
     return tl
 
 
 def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
-             font: str | None, tmp: Path) -> Path:
+             font: str | None, tmp: Path, cfg: dict) -> Path:
     dst = tmp / f"seg_{i:04d}.mp4"
     dur = max(0.3, t["src_out"] - t["src_in"])
     same_orientation = (clip["width"] >= clip["height"]) == (W >= H)
@@ -62,9 +63,9 @@ def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
     if t.get("text") and font:
         txt = tmp / f"seg_{i:04d}.txt"
         txt.write_text(t["text"], encoding="utf-8")
-        fs = int(H * 0.065)
+        fs = int(H * float(cfg["caption_size"]) / 100)
         vf += (f",drawtext=fontfile='{_ff_path(font)}':textfile='{_ff_path(txt)}':fontsize={fs}:fontcolor=white:"
-               f"borderw=3:bordercolor=black@0.6:x=(w-text_w)/2:y=h*0.78:"
+               f"borderw=3:bordercolor=black@0.6:x=(w-text_w)/2:y=h*{int(cfg['caption_pos']) / 100:.2f}:"
                f"alpha='if(lt(t,0.3),t/0.3,if(gt(t,{dur-0.4:.2f}),({dur:.2f}-t)/0.4,1))'")
     vf += "[v]"
 
@@ -77,7 +78,7 @@ def _segment(i: int, t: dict, clip: dict, W: int, H: int, fps: int,
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         af = "[1:a]anull[a]"
     cmd += ["-filter_complex", f"{vf};{af}", "-map", "[v]", "-map", "[a]",
-            "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(int(cfg["render_crf"])),
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-r", str(fps), str(dst)]
     run(cmd)
     return dst
@@ -89,8 +90,9 @@ def render(project: Project, music: str | None = None, vertical: bool = False, h
            duck: bool = True) -> Path:
     tl = final_timeline(project, music, snap)
     clips = {c["path"]: c for c in read_json(project.clips_json, [])}
+    cfg = config.load()
     W, H = (1080, 1920) if vertical else ((1920, 1080) if hd else (1280, 720))
-    fps = 30
+    fps = int(cfg["render_fps"])
     font = find_font(font) if captions else None
     if captions and any(t.get("text") for t in tl) and not font:
         log("  找不到中文字体，字幕将跳过（可用 --font 指定 .ttf/.ttc）")
@@ -100,7 +102,7 @@ def render(project: Project, music: str | None = None, vertical: bool = False, h
     log(f"渲染预览：{len(tl)} 段，{W}x{H}…")
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        segs = list(ex.map(lambda a: _segment(a[0], a[1], clips[a[1]["src"]], W, H, fps, font, tmp),
+        segs = list(ex.map(lambda a: _segment(a[0], a[1], clips[a[1]["src"]], W, H, fps, font, tmp, cfg),
                            enumerate(tl)))
     listfile = tmp / "list.txt"
     listfile.write_text("".join(f"file '{p.name}'\n" for p in segs), encoding="utf-8")
@@ -111,13 +113,14 @@ def render(project: Project, music: str | None = None, vertical: bool = False, h
     out = project.out(out_name)
 
     if music:
-        fade_st = max(0.0, total - 3.0)
+        fin, fout = float(cfg["music_fade_in"]), float(cfg["music_fade_out"])
+        fade_st = max(0.0, total - fout)
         fc = ("[0:a]asplit=2[v1][v2];"
               f"[1:a]aresample=48000,aformat=channel_layouts=stereo,volume={music_volume}[m];"
               # duck the music whenever original sound/speech is playing
-              + ("[m][v1]sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400[md];"
+              + (f"[m][v1]sidechaincompress=threshold=0.02:ratio={int(cfg['duck_ratio'])}:attack=20:release=400[md];"
                  if duck else "[v1]anullsink;[m]anull[md];") +
-              f"[md]afade=t=in:d=1.5,afade=t=out:st={fade_st:.2f}:d=3[mf];"
+              f"[md]{','.join(x for x in (f'afade=t=in:d={fin:.2f}' if fin > 0 else '', f'afade=t=out:st={fade_st:.2f}:d={fout:.2f}' if fout > 0 else '') if x) or 'anull'}[mf];"
               "[v2][mf]amix=inputs=2:duration=first:normalize=0[a]")
         run(["ffmpeg", "-y", "-v", "error", "-i", str(joined), "-stream_loop", "-1", "-i", music,
              "-filter_complex", fc, "-map", "0:v", "-map", "[a]", "-c:v", "copy",

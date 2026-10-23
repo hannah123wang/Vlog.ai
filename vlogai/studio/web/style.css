@@ -364,3 +364,11 @@ body.on-settings .job { bottom: 86px; }  /* 别挡住底部的保存栏 */
 .pshot.drop { border-color: var(--accent); background: var(--accent-bg); }
 .phow { font-size: 12px; color: var(--accent); }
 @media (max-width: 760px) { .psketch, .pref { width: 150px; } }
+
+/* ---- 设置页：数字框一行、“更多参数”折叠区 */
+.numrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.numrow .field.num { width: 110px; }
+details.more { border-top: 1px solid var(--line); padding-top: 14px; }
+details.more > summary { cursor: pointer; color: var(--text2); font-weight: 500; min-height: 32px; list-style-position: outside; }
+details.more[open] > summary { margin-bottom: 16px; }
+details.more > * + * { margin-top: 18px; }

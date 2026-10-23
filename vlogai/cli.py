@@ -54,8 +54,8 @@ def main(argv=None):
         sp.add_argument("--hd", action="store_true", help="预览用 1080p（默认 720p，更快）")
         sp.add_argument("--no-snap", action="store_true", help="不按音乐节拍调整剪辑点")
         sp.add_argument("--font", help="字幕字体文件路径")
-        sp.add_argument("--whisper", default="small", help="Whisper 模型大小 tiny/base/small/medium")
-        sp.add_argument("--workers", type=int, default=4)
+        sp.add_argument("--whisper", default=None, help="Whisper 模型大小 tiny/base/small/medium（默认用设置页的）")
+        sp.add_argument("--workers", type=int, default=None, help="并行数（默认用设置页的）")
         sp.add_argument("--subject", help='这部片子的主人公，例如 "我（长发女生）和男朋友 James"。'
                                           "用来判断哪些镜头必须保留")
         sp.add_argument("--days", type=int, default=3, help="plan 命令用：拍几天")
@@ -78,6 +78,11 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     from . import applog, config
+    cfg = config.load()
+    if args.workers is None:
+        args.workers = int(cfg["workers"])
+    if args.whisper is None:
+        args.whisper = cfg["whisper_model"]
     applog.setup(config.get("log_level"), console=False)   # print 照常上屏，同时写进 logs/vlogai.log
     if not isinstance(sys.stdout, applog.TeeStdout):
         sys.stdout = applog.TeeStdout(sys.stdout)
@@ -117,11 +122,15 @@ def main(argv=None):
     if args.cmd in ("run", "story", "revise", "recheck", "board"):
         storyboard.storyboard(p)
     if args.cmd in ("run", "render", "revise", "recheck"):
-        render.render(p, music=o.get("music"), vertical=o.get("vertical", False), hd=args.hd,
-                      font=args.font, snap=not args.no_snap)
+        # 命令行没写的参数，用设置页里的（以前命令行渲染完全不看设置页）
+        render.render(p, music=o.get("music"), vertical=o.get("vertical", False),
+                      hd=args.hd or bool(cfg["render_hd"]), font=args.font or cfg["font"] or None,
+                      snap=(not args.no_snap) and bool(cfg["beat_snap"]),
+                      music_volume=float(cfg["music_volume"]), captions=bool(cfg["burn_captions"]),
+                      duck=bool(cfg["duck_music"]), workers=int(cfg["render_workers"]))
     if args.cmd in ("run", "export", "render", "revise", "recheck"):
         if args.cmd == "export":
-            render.final_timeline(p, o.get("music"), snap=not args.no_snap)
+            render.final_timeline(p, o.get("music"), snap=(not args.no_snap) and bool(cfg["beat_snap"]))
         export_xml.export_xml(p, music=o.get("music"))
     if llm is not None and llm.usage["input_tokens"]:
         log(f"本次 AI 用量合计：输入 {llm.usage['input_tokens']:,} / 输出 {llm.usage['output_tokens']:,} tokens")

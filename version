@@ -21,12 +21,31 @@ shootplan + protect
 - “标为必用”现在真正生效：必用镜头优先级最高，一定会进成片
 - 故事线页显示保护汇总；时间线上受保护的镜头有盾牌，AI 漏掉后自动补回的镜头用虚线框；删除受保护镜头前会提醒
 
-== 3. 安全修复（server.py） ==
+== 3. 切镜头提速（frames.py） ==
+- 长片段先用 ffmpeg 转成 320px、每秒 10 帧的低分辨率代理（先试显卡解码），再在代理上用 PySceneDetect 切镜头；
+  不再用 OpenCV 逐帧解码 4K 原片。代理存在项目的 proxies/ 里，下次直接用；原片修改过会重做
+- 测试：80 秒 4K 视频，切镜头从 26 秒降到 11 秒，切点完全一致；代理已存在时不到 1 秒
+- 已经切好镜头的素材不再重复检测：“继续看片”、换 Key 重跑时直接沿用（以前每次都把所有长视频重新切一遍）
+- 转代理失败时自动退回到原片上检测；新做代理时在日志里报一下用时
+
+== 4. 设置页：更多参数可以手动调（config.py、app.js） ==
+- 以前写死在代码里的参数都搬到了设置页，每个数字框旁边显示允许范围，改过的项有“默认 x”按钮一键恢复；
+  保存前先在网页里检查范围，出错时说清楚是哪一项
+- 抽帧与切镜头（“更多参数”里）：忽略多短的文件、每个镜头至少多长、是否用代理 / 代理宽度 / 代理帧率 / 显卡解码、
+  清晰度基准、理想亮度；抽帧间隔可以到 0.5 秒，每个镜头最多可选 8 帧
+- 新增“关键画面保护”：总开关；正脸 / 同框 / 结尾三条规则开关；风景分、精彩度门槛；受保护镜头最多占成片多少；画质下限
+- 新增“剪辑节奏”：成片长于几分钟按长片剪、短片 / 长片平均每段几秒、对齐节拍时最多拉长 / 缩短多少、拍摄脚本每天几个镜头
+- 预览渲染：帧率、画质（CRF）、字幕字号和位置、音乐淡入 / 淡出、说话时音乐压低力度、同时渲染几段
+- 性能与高级：API 出错时重试几次
+- 修复：命令行渲染以前完全不看设置页（音乐音量、压低音乐、字幕、字体、1080p 都用固定值）；命令行的并行数和 Whisper 模型也改为默认用设置页的
+- API Key 的创建链接改成 platform.claude.com
+
+== 5. 安全修复（server.py） ==
 - 修复：网页可以通过 /media/%2E%2E/.env 读到 API Key（路径穿越）
 - 修复：任何网站都能偷偷调用本地后端（改设置、花额度）。现在只允许本机网页和 Lovable，其他网站要在设置页“允许访问的网页”里添加
 - 挡住 DNS rebinding（Host 必须是本机）；POST 必须是 application/json；项目名过滤特殊字符
 
-== 4. Bug 修复 ==
+== 6. Bug 修复 ==
 - 重新扫描时，如果新加的视频拍摄时间更早，镜头编号会整体错位（日志张冠李戴）（probe.py、frames.py）
 - 删过某个版本文件后，新存的版本会覆盖已有的版本（story.py）
 - 每次打开素材页，保护规则都往任务日志里刷屏；必用列表里的引号会弄坏提示词；best_moment 为空时崩溃（protect.py）
@@ -41,7 +60,7 @@ shootplan + protect
 - 后端没有发草图时（比如后端还是旧版本），草图格子直接隐藏，不再每个镜头都显示“保存后更新草图”（app.js）
 
 == 修改的文件 ==
-vlogai/shootplan.py、sketch.py（新增）、protect.py、probe.py、frames.py、story.py、llm.py、describe.py、cli.py、config.py、__main__.py
+vlogai/shootplan.py、sketch.py（新增）、protect.py、probe.py、frames.py、story.py、beats.py、render.py、llm.py、describe.py、cli.py、config.py、__main__.py
 vlogai/studio/server.py、jobs.py、web/app.js、web/i18n.js、web/style.css
 API.md、README.md、LOVABLE_HANDOFF.md
 

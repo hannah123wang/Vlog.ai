@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from . import config
 from .common import Project, log, read_json, write_json
 from .describe import load_logged_shots
 from .protect import enforce, must_include_block, protected
@@ -76,13 +77,15 @@ Return the full revised story in the same JSON format (title, logline, chapters,
 
 def _pacing(target_seconds: float) -> tuple[str, int]:
     """短片和长片的剪辑节奏完全不同——这里按目标时长切换。"""
-    if target_seconds <= 360:
+    cfg = config.load()     # 设置页“剪辑节奏”：长片从几分钟开始、短片 / 长片平均每段几秒
+    if target_seconds <= float(cfg["longform_min"]) * 60:
         return ("tight vlog cutting: b-roll shots 1.5-4 s, speech/reaction moments as long as the "
-                "sentence needs. Cut anything that repeats.", max(8, int(target_seconds / 3.5)))
+                "sentence needs. Cut anything that repeats.",
+                max(8, int(target_seconds / float(cfg["short_seg_sec"]))))
     return ("long-form edit: let shots breathe (6-15 s each, the best ones longer), keep most of the "
             "trip rather than only the highlights, but still drop dead air, repeats and soft/shaky "
             "material, and keep a varied rhythm so it never feels like a slideshow.",
-            max(12, int(target_seconds / 9)))
+            max(12, int(target_seconds / float(cfg["long_seg_sec"]))))
 
 
 def _compact(shots: list[dict]) -> list[dict]:

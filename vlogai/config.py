@@ -23,6 +23,29 @@ DEFAULTS: dict = {
     "long_clip_sec": 20.0,        # 长于这个时长的片段才做切镜头
     "scene_sensitivity": "mid",   # low / mid / high
     "bad_quality": 0.25,          # 画质分低于它算废片
+    "min_clip_sec": 0.5,          # 短于这个时长的文件直接忽略（误触录的一下）
+    "min_scene_sec": 2.0,         # 切镜头时，每个镜头至少多长
+    "use_proxy": True,            # 长片段先转低分辨率代理再切镜头
+    "proxy_width": 320,           # 代理宽度（像素）
+    "proxy_fps": 10,              # 代理每秒几帧
+    "hwaccel": True,              # 转代理时尝试用显卡解码
+    "sharp_ref": 300.0,           # 清晰度达到多少算满分（512px 静帧的拉普拉斯方差）
+    "exposure_target": 120,       # 理想的平均亮度（0-255）
+    # 关键画面保护
+    "protect_enabled": True,
+    "protect_faces": True,        # 主人公正脸
+    "protect_together": True,     # 关键人物同框
+    "protect_scenery": 8,         # 风景分 ≥ 它就保护（0 = 不按风景保护）
+    "protect_highlight": 9,       # 精彩度 ≥ 它就保护（0 = 不按精彩度保护）
+    "protect_ending": True,       # 适合作结尾的镜头
+    "protect_max_share": 0.65,    # 受保护镜头最多占成片多少
+    "protect_min_quality": 0.18,  # 画质低于它的镜头再重要也不保护
+    # 剪辑节奏
+    "longform_min": 6.0,          # 成片长于几分钟按“长片”节奏剪
+    "short_seg_sec": 3.5,         # 短片：平均每段几秒（决定让 AI 剪多少段）
+    "long_seg_sec": 9.0,          # 长片：平均每段几秒
+    "beat_snap_range": 0.4,       # 对齐节拍时，每段最多拉长 / 缩短多少
+    "plan_shots_per_day": 0,      # 拍摄脚本每天几个镜头（0 = 按成片长度自动）
     # 语音转写
     "whisper": False,
     "whisper_model": "small",
@@ -33,8 +56,17 @@ DEFAULTS: dict = {
     "duck_music": True,
     "burn_captions": True,
     "font": "",
+    "render_fps": 30,
+    "render_crf": 22,             # 画质：越小越清晰、文件越大
+    "caption_size": 6.5,          # 字幕字号，占画面高度的百分比
+    "caption_pos": 78,            # 字幕位置，从画面顶部算起的百分比
+    "music_fade_in": 1.5,
+    "music_fade_out": 3.0,
+    "duck_ratio": 12,             # 有人说话时音乐压低的力度（压缩比）
     # 性能与高级
     "workers": 4,
+    "render_workers": 2,          # 渲染预览时同时转几段
+    "api_retries": 2,             # API 临时出错（超时、过载）时重试几次
     "port": 8765,
     "projects_dir": "projects",
     "log_level": "INFO",          # DEBUG 会额外记录每一个接口请求
@@ -52,6 +84,17 @@ _RULES: dict = {
     "scene_sensitivity": {"low", "mid", "high"}, "lang": {"zh", "en"},
     "whisper_model": {"tiny", "base", "small", "medium", "large-v3"},
     "log_level": {"DEBUG", "INFO", "WARNING"},
+    "min_clip_sec": (float, 0, 10), "min_scene_sec": (float, 0.5, 30),
+    "proxy_width": (int, 160, 960), "proxy_fps": (int, 2, 30),
+    "sharp_ref": (float, 50, 2000), "exposure_target": (int, 40, 220),
+    "protect_scenery": (int, 0, 10), "protect_highlight": (int, 0, 10),
+    "protect_max_share": (float, 0, 1), "protect_min_quality": (float, 0, 0.9),
+    "longform_min": (float, 1, 120), "short_seg_sec": (float, 1, 20), "long_seg_sec": (float, 2, 60),
+    "beat_snap_range": (float, 0, 0.9), "plan_shots_per_day": (int, 0, 40),
+    "render_fps": {24, 25, 30, 50, 60}, "render_crf": (int, 14, 35),
+    "caption_size": (float, 2, 15), "caption_pos": (int, 5, 95),
+    "music_fade_in": (float, 0, 10), "music_fade_out": (float, 0, 15), "duck_ratio": (int, 1, 20),
+    "render_workers": (int, 1, 16), "api_retries": (int, 0, 6),
 }
 
 
@@ -84,8 +127,13 @@ def validate(patch: dict) -> dict:
         rule = _RULES.get(k)
         default = DEFAULTS[k]
         if isinstance(rule, set):
+            if all(isinstance(x, int) for x in rule):
+                try:
+                    v = int(float(v))
+                except (TypeError, ValueError):
+                    pass
             if v not in rule:
-                raise ValueError(f"{k} 只能是 {'/'.join(sorted(rule))}")
+                raise ValueError(f"{k} 只能是 {'/'.join(str(x) for x in sorted(rule))}")
         elif isinstance(rule, tuple):
             typ, lo, hi = rule
             try:

@@ -5,6 +5,7 @@ Only small JPEGs (~512px) are ever sent to the AI — never the original 4K vide
 from __future__ import annotations
 
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,25 +20,90 @@ from .common import Project, log, read_json, run, write_json
 #   scene_sensitivity    切镜头灵敏度 low/mid/high
 
 
-def _detect_scenes(path: str, duration: float) -> list[tuple[float, float]]:
-    """Return [(start, end)] seconds. Falls back to one shot if PySceneDetect is missing."""
-    if duration < float(config.get("long_clip_sec")):
-        return [(0.0, duration)]
+# ---- 切镜头用的低分辨率代理 -------------------------------------------------------
+# PySceneDetect 用 OpenCV 逐帧解码原片：一段 10 分钟的 4K HEVC 要解码 18000 帧 4K 画面，
+# 而它检测前本来就会把画面缩到 256px 左右（auto_downscale）。所以先用 ffmpeg（多线程、
+# 能用显卡解码）转成 320px、每秒 10 帧的小文件，再在小文件上检测，结果基本一样，快很多。
+# 代理文件存在项目的 proxies/ 里，下次直接用；原片改过（修改时间更新）会重做。
+PROXY_DIR = "proxies"
+# 代理宽度、帧率、是否用显卡解码：设置页可以改（proxy_width / proxy_fps / hwaccel）
+
+
+def _make_proxy(project: Project, clip: dict) -> Path | None:
+    src = Path(clip["path"])
+    pw, pf = int(config.get("proxy_width")), int(config.get("proxy_fps"))
+    out = project.out(PROXY_DIR) / f"{clip['id']}_{pw}p{pf}.mp4"      # 改了尺寸 / 帧率就是另一个文件
+    try:
+        if out.is_file() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+    except OSError:
+        return None
+    out.parent.mkdir(exist_ok=True)
+    tmp = out.with_name(out.stem + ".part.mp4")
+    tail = ["-i", str(src), "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-vf", f"fps={pf},scale={pw}:-2:flags=fast_bilinear,format=yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-g", str(pf * 2),
+            "-movflags", "+faststart", str(tmp)]
+    for hw in ((["-hwaccel", "auto"], []) if config.get("hwaccel") else ([],)):   # 先试显卡解码，不行就纯 CPU
+        try:
+            run(["ffmpeg", "-y", "-v", "error", *hw, *tail])
+            if tmp.is_file() and tmp.stat().st_size > 0:
+                tmp.replace(out)
+                return out
+        except RuntimeError:
+            pass
+        tmp.unlink(missing_ok=True)
+    return None
+
+
+def _detect_scenes(path: str, duration: float, proxy: Path | None = None) -> list[tuple[float, float]]:
+    """Return [(start, end)] seconds. Falls back to one shot if PySceneDetect is missing.
+
+    proxy：同一段视频的低分辨率代理（时间轴和原片一致），有就在它上面检测。"""
     try:
         from scenedetect import ContentDetector, SceneManager, open_video
     except ImportError:
         return [(0.0, duration)]
     try:
-        video = open_video(path)
+        video = open_video(str(proxy or path))
         sm = SceneManager()
         sm.auto_downscale = True
-        sm.add_detector(ContentDetector(threshold=config.SCENE_THRESHOLDS[config.get("scene_sensitivity")], min_scene_len=int(video.frame_rate * 2)))
-        sm.detect_scenes(video, frame_skip=2, show_progress=False)
+        sm.add_detector(ContentDetector(threshold=config.SCENE_THRESHOLDS[config.get("scene_sensitivity")],
+                                        min_scene_len=max(2, int(video.frame_rate * float(config.get("min_scene_sec"))))))
+        # 代理已经是每秒 10 帧，不用再跳帧；原片每 3 帧看一帧
+        sm.detect_scenes(video, frame_skip=0 if proxy else 2, show_progress=False)
         scenes = [(s.get_seconds(), e.get_seconds()) for s, e in sm.get_scene_list()]
     except Exception as e:  # noqa: BLE001 — never let one odd file kill the run
         log(f"  场景检测失败，整段当作一个镜头: {Path(path).name} ({e})")
         scenes = []
-    return scenes or [(0.0, duration)]
+    if not scenes:
+        return [(0.0, duration)]
+    # 代理和原片的时长可能差几十毫秒：首尾对齐到原片
+    scenes = [(max(0.0, a), min(duration, b)) for a, b in scenes if a < duration]
+    scenes[0] = (0.0, scenes[0][1])
+    scenes[-1] = (scenes[-1][0], duration)
+    return scenes
+
+
+def _scenes_for(project: Project, clip: dict) -> list[tuple[float, float]]:
+    dur = clip["duration"]
+    if dur < float(config.get("long_clip_sec")):
+        return [(0.0, dur)]
+    try:
+        import scenedetect  # noqa: F401
+    except ImportError:
+        return [(0.0, dur)]
+    t0 = time.time()
+    use_proxy = bool(config.get("use_proxy"))
+    proxy = _make_proxy(project, clip) if use_proxy else None
+    t1 = time.time()
+    if use_proxy and proxy is None:
+        log(f"  {clip['name']}：转代理失败，直接在原片上切镜头（会慢一些）")
+    scenes = _detect_scenes(clip["path"], dur, proxy)
+    if t1 - t0 > 2:                     # 新做了代理才报一下用时
+        log(f"  {clip['name']}（{dur / 60:.1f} 分钟）切成 {len(scenes)} 个镜头 · "
+            f"代理 {t1 - t0:.0f} 秒 + 检测 {time.time() - t1:.0f} 秒")
+    return scenes
 
 
 def _grab_frame(src: str, t: float, dst: Path, width: int = 512) -> bool:
@@ -52,7 +118,7 @@ def _grab_frame(src: str, t: float, dst: Path, width: int = 512) -> bool:
         return False
 
 
-def _quality(frame_paths: list[Path]) -> dict:
+def _quality(frame_paths: list[Path], sharp_ref: float = 300.0, expo_target: float = 120.0) -> dict:
     """Sharpness (Laplacian variance), exposure and 'boring/static' score from keyframes."""
     try:
         import cv2
@@ -78,8 +144,8 @@ def _quality(frame_paths: list[Path]) -> dict:
     s = float(np.median(sharp))
     b = float(np.mean(bright))
     change = float(np.mean([abs(a - b_).mean() for a, b_ in zip(grays, grays[1:])])) if len(grays) > 1 else 0.0
-    sharp_score = min(1.0, s / 300.0)                       # ~300+ = crisp at 512px
-    expo_score = 1.0 - min(1.0, abs(b - 120) / 110.0)        # penalise very dark / blown out
+    sharp_score = min(1.0, s / sharp_ref)                   # ~300+ = crisp at 512px（设置页：清晰度基准）
+    expo_score = 1.0 - min(1.0, abs(b - expo_target) / 110.0)  # penalise very dark / blown out
     q = round((sharp_score ** 0.5) * (0.5 + 0.5 * expo_score), 3)  # blur dominates
     return {"quality": q, "sharpness": round(s, 1), "brightness": round(b, 1),
             "visual_change": round(change, 2)}
@@ -94,9 +160,18 @@ def extract(project: Project, workers: int = 4) -> list[dict]:
     every, max_n, width = float(cfg["frame_every_sec"]), int(cfg["max_frames_per_shot"]), int(cfg["frame_width"])
     log(f"切分镜头并抽取关键帧（{len(clips)} 条素材）…")
 
+    # 这条素材以前已经切过镜头（同一个文件）：直接沿用，不再重新解码检测。
+    # “继续看片”、改了 Key 重跑时，以前每次都要把所有长视频重新切一遍。
+    by_clip: dict[str, list[dict]] = {}
+    for s in old.values():
+        by_clip.setdefault(s["clip_id"], []).append(s)
+
     def work(clip: dict) -> list[dict]:
+        prev = by_clip.get(clip["id"])
+        if prev and all(s.get("src") == clip["path"] for s in prev):
+            return sorted(prev, key=lambda s: s["start"])
         shots = []
-        for k, (st, en) in enumerate(_detect_scenes(clip["path"], clip["duration"]), 1):
+        for k, (st, en) in enumerate(_scenes_for(project, clip), 1):
             sid = f"{clip['id']}_s{k:02d}"
             if sid in old and old[sid].get("src") == clip["path"]:
                 shots.append(old[sid])
@@ -115,7 +190,8 @@ def extract(project: Project, workers: int = 4) -> list[dict]:
                     "start": round(st, 3), "end": round(en, 3), "duration": round(dur, 3),
                     "day": clip["day"], "created": clip["created"], "gps": clip["gps"],
                     "has_audio": clip["has_audio"], "frames": frames}
-            shot.update(_quality([Path(f["path"]) for f in frames]))
+            shot.update(_quality([Path(f["path"]) for f in frames],
+                                 float(cfg["sharp_ref"]), float(cfg["exposure_target"])))
             shots.append(shot)
         return shots
 

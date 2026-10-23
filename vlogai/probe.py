@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import config
 from .common import VIDEO_EXTS, Project, log, read_json, run, write_json
 
 
@@ -109,7 +110,8 @@ def scan(footage_dir: Path, project: Project) -> list[dict]:
     files = sorted(p for p in footage_dir.rglob("*")
                    if p.suffix.lower() in VIDEO_EXTS and not p.name.startswith("."))
     log(f"在 {footage_dir} 找到 {len(files)} 个视频文件，读取元数据…")
-    clips = [c for c in (probe_file(p) for p in files) if c and c["duration"] >= 0.5]
+    min_len = float(config.get("min_clip_sec"))
+    clips = [c for c in (probe_file(p) for p in files) if c and c["duration"] >= max(0.1, min_len)]
     clips.sort(key=lambda c: c["created"])
 
     # group by calendar day (local-ish: uses the stored offset) -> Day 1, Day 2 ...

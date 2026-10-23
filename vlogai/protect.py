@@ -11,16 +11,29 @@ from __future__ import annotations
 
 import json
 
+from . import config
 from .common import log, read_json
 
-# 规则：(判断函数, 原因, 优先级)  优先级高的在裁剪时后被放弃
-RULES = [
-    (lambda lg, s: lg.get("subject_present") and lg.get("faces_clear"), "主人公正脸", 100),
-    (lambda lg, s: lg.get("people_together"), "关键人物同框", 95),
-    (lambda lg, s: (lg.get("scenery_value") or 0) >= 8, "重要风景/地标", 80),
-    (lambda lg, s: (lg.get("highlight") or 0) >= 9, "AI 评为极精彩", 70),
-    (lambda lg, s: "ending" in (lg.get("story_roles") or []), "适合作结尾", 60),
-]
+
+def _rules(cfg: dict) -> list:
+    """规则：(判断函数, 原因, 优先级)。优先级高的在超出上限时后被放弃。开关和门槛在设置页“关键画面保护”里改。"""
+    out = []
+    if cfg["protect_faces"]:
+        out.append((lambda lg, s: lg.get("subject_present") and lg.get("faces_clear"), "主人公正脸", 100))
+    if cfg["protect_together"]:
+        out.append((lambda lg, s: lg.get("people_together"), "关键人物同框", 95))
+    if int(cfg["protect_scenery"]) > 0:
+        n = int(cfg["protect_scenery"])
+        out.append((lambda lg, s: (lg.get("scenery_value") or 0) >= n, "重要风景/地标", 80))
+    if int(cfg["protect_highlight"]) > 0:
+        h = int(cfg["protect_highlight"])
+        out.append((lambda lg, s: (lg.get("highlight") or 0) >= h, "AI 评为极精彩", 70))
+    if cfg["protect_ending"]:
+        out.append((lambda lg, s: "ending" in (lg.get("story_roles") or []), "适合作结尾", 60))
+    return out
+
+
+RULES = _rules(config.DEFAULTS)     # 默认规则（给外部参考用）；实际每次按当前设置生成
 
 MIN_QUALITY = 0.18          # 糊成一片的镜头，再重要也救不回来
 MAX_SHARE = 0.65            # 受保护镜头最多占成片的六成，否则等于没得剪
@@ -48,6 +61,9 @@ def protected(project, shots: list[dict], target_seconds: float | None = None,
     用户在界面里的选择优先于自动规则：标为必用 → 一定保护；点了“不保护” → 自动规则不再保护它；
     排除的镜头不会出现在这里（load_logged_shots 已经把它们去掉了）。"""
     fl = user_flags(project)
+    cfg = config.load()
+    rules = _rules(cfg) if cfg["protect_enabled"] else []      # 关掉自动保护后，只剩你标的“必用”
+    min_q, max_share = float(cfg["protect_min_quality"]), float(cfg["protect_max_share"])
     hits: list[tuple[int, str, str, float]] = []   # (优先级, id, 原因, 时长)
     for s in shots:
         if s["id"] in fl["exclude"]:
@@ -58,9 +74,9 @@ def protected(project, shots: list[dict], target_seconds: float | None = None,
         if s["id"] in fl["must"]:
             hits.append((120, s["id"], USER_MUST, dur))
             continue
-        if s["id"] in fl["unprotect"] or s.get("quality", 1) < MIN_QUALITY:
+        if s["id"] in fl["unprotect"] or s.get("quality", 1) < min_q:
             continue
-        for test, reason, prio in RULES:
+        for test, reason, prio in rules:
             try:
                 ok = test(lg, s)
             except Exception:  # noqa: BLE001
@@ -72,7 +88,7 @@ def protected(project, shots: list[dict], target_seconds: float | None = None,
     hits.sort(key=lambda h: -h[0])
     # 保护太多等于没剪：超过上限就按优先级截断
     if target_seconds:
-        cap, total, kept = MAX_SHARE * target_seconds, 0.0, []
+        cap, total, kept = max_share * target_seconds, 0.0, []
         for prio, sid, reason, dur in hits:
             if total + dur > cap:
                 continue
