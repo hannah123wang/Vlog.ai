@@ -71,3 +71,18 @@ vlogai/studio/web/index.html、app.js、style.css
 - 更新代码后要重启 studio（Ctrl+C 后重新运行 python -m vlogai.studio），只改网页文件时刷新页面即可
 - 启动时不用再写 --port，默认用设置页里的端口（8765）
 - .env、vlogai_settings.json、logs/ 都是本机文件，不会被提交到 git
+
+2026 Oct 22
+Add new feature 关键画面保护/中英文切换/提前写脚本
+
+== 新增文件 ==
+vlogai/protect.py
+vlogai/shootplan.py
+
+
+== 修改的文件 ==
+vlogai/cli.py
+vlogai/describe.py
+vlogai/outline.py
+vlogai/story.py
+vlogai/studio/server.py

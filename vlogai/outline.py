@@ -11,6 +11,7 @@ import json
 
 from .common import Project, log, read_json, write_json
 from .describe import load_logged_shots
+from .protect import enforce, must_include_block, protected
 from .story import _compact, _max_tokens, _pacing, _save, _validate
 
 BEATS_SYSTEM = """You are a documentary editor in the story-planning conversation with a creator.
@@ -24,6 +25,10 @@ BEATS_PROMPT = """The creator's rough idea for the piece:
 
 Target length: {target} seconds. Pacing: {pacing}
 Write all text in {lang}.
+
+These shots are protected — the creator will notice if the film doesn't contain them. Make sure your
+beats give every one of them a home:
+<must_include>{must_include}</must_include>
 
 Shot log (id, day, time, dur, q=technical quality 0-1, hl=highlight 1-10, type, roles, place, mood,
 sum=what happens, best=best in/out, speech):
@@ -52,11 +57,13 @@ def propose_beats(project: Project, llm, idea: str, target_seconds: float, lang:
     if not shots:
         raise SystemExit("还没有镜头日志，先跑 describe")
     pacing, n_seg = _pacing(target_seconds)
+    prot = protected(project, shots, target_seconds)
     log(f"AI 读你的想法 + {len(shots)} 个镜头，提出分幕结构…")
     prompt = BEATS_PROMPT.format(idea=idea or "(the creator hasn't said — propose what this footage "
                                               "most naturally becomes)",
                                  target=int(target_seconds), pacing=pacing, lang=lang,
-                                 shots=json.dumps(_compact(shots), ensure_ascii=False))
+                                 shots=json.dumps(_compact(shots), ensure_ascii=False),
+                                 must_include=must_include_block(prot, shots))
     data = llm.plan(BEATS_SYSTEM, prompt, max_tokens=8000)
     by_id = {s["id"] for s in shots}
     for b in data.get("beats", []):
@@ -90,6 +97,9 @@ Aim for roughly {n_segments} segments overall. Write text in {lang}.
 Shot log:
 <shots_json>{shots}</shots_json>
 
+Shots that MUST appear in the cut (protected — the creator will notice if they are missing):
+<must_include>{must_include}</must_include>
+
 Return JSON:
 {{
  "title": "...", "logline": "...",
@@ -108,13 +118,16 @@ def story_from_beats(project: Project, llm, beats: list[dict], target_seconds: f
                      lang: str, idea: str = "") -> dict:
     shots = load_logged_shots(project)
     pacing, n_seg = _pacing(target_seconds)
+    prot = protected(project, shots, target_seconds)
     log(f"按你确认的 {len(beats)} 幕结构铺时间线（目标 {target_seconds/60:.1f} 分钟）…")
     prompt = STORY_FROM_BEATS_PROMPT.format(
         beats=json.dumps(beats, ensure_ascii=False), idea=idea or "(none)",
         target=int(target_seconds), pacing=pacing, n_segments=n_seg, lang=lang,
-        shots=json.dumps(_compact(shots), ensure_ascii=False))
+        shots=json.dumps(_compact(shots), ensure_ascii=False),
+        must_include=must_include_block(prot, shots))
     plan = _validate(llm.plan(STORY_FROM_BEATS_SYSTEM, prompt,
                               max_tokens=_max_tokens(n_seg)), shots)
+    plan = enforce(plan, prot, shots)
     _save(project, plan, "from approved outline")
     return plan
 

@@ -20,6 +20,7 @@ Reply with ONLY a JSON object, no prose."""
 PROMPT = """<meta>{meta}</meta>
 Keyframe times (s, relative to shot start): {times}
 Transcribed speech in this shot: {speech}
+The creator's main subject(s) — the people this film is about: {subject}
 
 Return JSON with exactly these keys:
 {{
@@ -33,12 +34,17 @@ Return JSON with exactly these keys:
  "highlight": 1-10 integer (how much a viewer would want to see this; blurry/shaky/nothing happening = low),
  "best_moment": {{"start": seconds, "end": seconds}}  (best continuous 2-8s part, relative to shot start, within 0..{dur}),
  "keep_audio": true if the original sound/speech is worth hearing in the final vlog,
+ "faces_clear": true only if a human face is clearly visible, in focus and facing the camera enough to recognise,
+ "subject_present": true if one of the creator's main subjects (above) appears in this shot,
+ "people_together": true if two or more people share the frame,
+ "scenery_value": 1-10 how striking the landscape, seascape, forest, landmark or architecture is (1 if there is none),
  "tags": ["3-6 short search tags"]
 }}
 Write all free-text values in {lang}."""
 
 
-def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4) -> None:
+def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4,
+                 subject: str = "") -> None:
     shots = read_json(project.shots_json)
     if not shots:
         raise SystemExit("先运行 frames")
@@ -55,7 +61,9 @@ def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4)
         prompt = PROMPT.format(
             meta=json.dumps(meta, ensure_ascii=False),
             times=[round(f["t"] - s["start"], 1) for f in s["frames"]],
-            speech=speech or "(none)", dur=round(s["duration"], 1), lang=lang)
+            speech=speech or "(none)", dur=round(s["duration"], 1), lang=lang,
+            subject=subject or project.settings().get("subject")
+                    or "(not specified — treat the person who recurs most as the main subject)")
         try:
             d = llm.describe(SYSTEM, prompt, [f["path"] for f in s["frames"]])
         except AuthError:

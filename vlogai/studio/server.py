@@ -18,7 +18,8 @@ from pathlib import Path
 from .. import __version__, applog, config
 from ..applog import log
 from .. import describe as describe_mod
-from .. import export_xml, frames, outline, probe, render, story, storyboard, transcribe
+from .. import export_xml, frames, outline, probe, render, shootplan, story, storyboard, transcribe
+from ..protect import protected
 from ..common import VIDEO_EXTS, Project, read_json, require_ffmpeg, write_json
 from ..llm import get_llm, key_hint, test_key
 from .jobs import JobRunner
@@ -81,6 +82,7 @@ def project_summary(pid: str) -> dict:
         "days": len({c["created"][:10] for c in clips}) if clips else 0,
         "unusable": sum(1 for s_ in shots if s_.get("quality", 1) < float(config.get("bad_quality"))),
         "has_outline": bool(ol.get("beats")),
+        "has_plan": p.out("shootplan.json").exists(),
         "beats": len(ol.get("beats", [])),
         "has_story": bool(st.get("timeline")),
         "story_title": st.get("title", ""),
@@ -135,6 +137,9 @@ def shots_payload(pid: str) -> list[dict]:
     clips = {c["id"]: c for c in read_json(p.clips_json, []) or []}
     fl = flags(p)
     must, exc = set(fl["must"]), set(fl["exclude"])
+    shots_all = read_json(p.shots_json, []) or []
+    prot = protected(p, [{**s, "log": read_json(p.logs_dir / f"{s['id']}.json", {}) or {}}
+                         for s in shots_all]) if shots_all else {}
     out = []
     for s in read_json(p.shots_json, []) or []:
         lg = read_json(p.logs_dir / f"{s['id']}.json", {}) or {}
@@ -155,7 +160,8 @@ def shots_payload(pid: str) -> list[dict]:
                     "vertical": c.get("height", 0) > c.get("width", 0) if (c := clips.get(s["clip_id"])) else False,
                     "tags": lg.get("tags", []), "activity": lg.get("activity", ""),
                     "best_moment": lg.get("best_moment"), "logged": bool(lg),
-                    "must": s["id"] in must, "excluded": s["id"] in exc})
+                    "must": s["id"] in must, "excluded": s["id"] in exc,
+                    "protected": prot.get(s["id"], "")})
     return out
 
 
@@ -188,12 +194,14 @@ def job_scan(pid: str, footage: str):
     probe.scan(footage, p)
 
 
-def job_analyze(pid: str, mock: bool, lang: str, whisper: bool, workers: int = 4):
+def job_analyze(pid: str, mock: bool, lang: str, whisper: bool, workers: int = 4, subject: str = ""):
     p = project_dir(pid)
+    if subject:
+        p.save_settings(subject=subject)
     frames.extract(p, workers=workers)
     if whisper:
         transcribe.transcribe(p, config.get("whisper_model"))
-    describe_mod.describe_all(p, get_llm(mock), lang=LANGS[lang], workers=workers)
+    describe_mod.describe_all(p, get_llm(mock), lang=LANGS[lang], workers=workers, subject=subject)
 
 
 def job_outline(pid: str, idea: str, minutes: float, mock: bool, lang: str):
@@ -223,6 +231,15 @@ def job_revise(pid: str, instruction: str, minutes: float, mock: bool, lang: str
     p = project_dir(pid)
     story.revise_story(p, get_llm(mock), instruction, minutes * 60, LANGS[lang])
     storyboard.storyboard(p)
+
+
+def job_plan(pid: str, brief: str, days: int, minutes: float, gear: str, mock: bool, lang: str):
+    p = project_dir(pid)
+    if mock:
+        shootplan.mock_plan(p, brief, days)
+    else:
+        shootplan.make_plan(p, get_llm(False), brief, days, minutes, gear, LANGS[lang])
+    shootplan.plan_html(p)
 
 
 def job_render(pid: str, music: str | None, vertical: bool, hd: bool):
@@ -450,6 +467,9 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 p = project_dir(urllib.parse.unquote(m.group(1)))
                 return self.json(read_json(p.out("outline.json"), {}) or {})
+            m = re.fullmatch(r"/api/projects/([^/]+)/shootplan", path)
+            if m:
+                return self.json(read_json(project_dir(urllib.parse.unquote(m.group(1))).out("shootplan.json"), {}) or {})
             m = re.fullmatch(r"/api/projects/([^/]+)/story", path)
             if m:
                 return self.json(story_payload(urllib.parse.unquote(m.group(1))))
@@ -506,7 +526,10 @@ class Handler(BaseHTTPRequestHandler):
             if action == "analyze":
                 runner.start("看素材", pid, job_analyze, pid, mock, lang,
                              bool(b.get("whisper", config.get("whisper"))),
-                             int(b.get("workers") or config.get("workers")))
+                             int(b.get("workers") or config.get("workers")), b.get("subject", ""))
+            elif action == "plan":
+                runner.start("写拍摄脚本", pid, job_plan, pid, b.get("brief", ""),
+                             int(b.get("days") or 3), minutes, b.get("gear", ""), mock, lang)
             elif action == "outline":
                 runner.start("编故事线", pid, job_outline, pid, b.get("idea", ""), minutes,
                              mock, lang)
@@ -559,7 +582,7 @@ def _sync_action(self, pid: str, action: str, b: dict):
         return {"flags": fl}
     if action == "settings":
         keep = {}
-        for k in ("brief", "music", "lang"):
+        for k in ("brief", "music", "lang", "subject"):
             if k in b and b[k] is not None:
                 keep[k] = str(b[k]).strip()
         if keep.get("music") and not Path(keep["music"]).expanduser().is_file():
