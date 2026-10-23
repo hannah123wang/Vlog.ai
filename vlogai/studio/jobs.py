@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 import time
 from datetime import datetime
 
+from .. import usage
 from ..applog import log, pipeline_line
 from ..llm import FatalError
 
@@ -95,6 +96,7 @@ class JobRunner:
             stream = _LineStream(job)
             t0 = time.time()
             log.info(f"▶ 开始任务「{name}」 项目 {project}")
+            usage.set_task(name, project, job.started)
             try:
                 with redirect_stdout(stream):
                     fn(*args, **kwargs)
@@ -124,6 +126,13 @@ class JobRunner:
                 job.add_line("✗ " + job.error, to_log=False)
                 job.add_line(traceback.format_exc()[-1500:], to_log=False)
                 log.exception(f"✗ 任务失败「{name}」 项目 {project}，用时 {time.time() - t0:.1f} 秒")
+
+            finally:
+                used = usage.task_total(job.started)
+                if used["calls"]:
+                    log.info(f"Token 用量「{name}」 项目 {project}：调用 {used['calls']} 次，"
+                             f"输入 {used['in']:,}，输出 {used['out']:,}")
+                usage.clear_task()
 
         threading.Thread(target=run, daemon=True).start()
         return job

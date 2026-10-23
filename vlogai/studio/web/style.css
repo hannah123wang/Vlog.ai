@@ -372,3 +372,31 @@ details.more { border-top: 1px solid var(--line); padding-top: 14px; }
 details.more > summary { cursor: pointer; color: var(--text2); font-weight: 500; min-height: 32px; list-style-position: outside; }
 details.more[open] > summary { margin-bottom: 16px; }
 details.more > * + * { margin-top: 18px; }
+
+/* ---- 运行日志 → Token 用量 */
+.logs-box.usage-box { font: inherit; background: transparent; border: none; height: auto; min-height: 0; overflow: visible; }
+.usage { display: flex; flex-direction: column; gap: 14px; }
+.utiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.utile { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; }
+.utile span { font-size: 13px; color: var(--muted); }
+.utile b { font: 500 26px var(--mono); }
+.utile small { font-size: 12px; color: var(--muted); }
+.ucard { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ucard h3 { font-size: 15px; }
+.ugrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.uchart { display: flex; align-items: flex-end; gap: 3px; height: 150px; }
+.ucol { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
+.ucol span { font: 10px var(--mono); color: var(--faint); }
+.ustack { width: 100%; max-width: 22px; display: flex; flex-direction: column; border-radius: 3px 3px 0 0; overflow: hidden; min-height: 0; }
+.ustack i, .ulegend i { display: block; }
+.ustack .in, .ulegend .in { background: var(--audio); }
+.ustack .out, .ulegend .out { background: var(--accent); }
+.ulegend { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.ulegend i { width: 10px; height: 10px; border-radius: 2px; margin-left: 8px; }
+.utable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.utable th { text-align: left; font-weight: 500; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.utable td { padding: 6px 8px; border-bottom: 1px solid var(--line); font-family: var(--mono); white-space: nowrap; }
+.utable td:first-child { font-family: inherit; position: relative; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.ubar { position: absolute; left: 0; top: 4px; bottom: 4px; width: var(--w); background: var(--accent-bg); border-radius: 3px; }
+.uname { position: relative; }
+.ucard:has(.utable) { overflow-x: auto; }

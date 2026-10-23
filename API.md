@@ -28,6 +28,7 @@ answers every web page (it used to send `Access-Control-Allow-Origin: *`):
 | `GET /api/env` | `{has_key, key, version, home, cwd, drives}` — whether a key is set (with a masked hint), the app version, the user's home dir |
 | `GET /api/settings` | app settings, defaults, `rules` (allowed range `[min, max]` or list of choices per key), the masked key and where it comes from |
 | `GET /api/logs?level=&q=&limit=` | `{entries, counts, file, level}` — the run log, newest last |
+| `GET /api/usage?days=30` | token usage from `logs/usage.jsonl`: `{totals:{today, week, month, all}, by_day, by_project, by_model, by_step, tasks, records, file}` — each total is `{calls, in, out}` |
 | `GET /api/logs/summary` | `{counts}` — warning / error counts for the header badge |
 | `GET /api/ls?path=` | folder browser: `{path, parent, dirs:[{name, path, videos}], videos_here}` |
 | `GET /api/projects` | `{projects:[summary]}` |

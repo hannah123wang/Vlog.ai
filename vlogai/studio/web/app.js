@@ -279,7 +279,7 @@ function render() {
   const keep = active && active.id ? { id: active.id, a: active.selectionStart, b: active.selectionEnd } : null;
   $('#app').innerHTML = S.page === 'settings' ? viewSettings() : S.page === 'logs' ? viewLogs() : !S.pid || !S.p ? viewWelcome() : { plan: viewPlan, footage: viewFootage, story: viewStory, timeline: viewTimeline, export: viewExport }[S.page]();
   if (S.pid && S.p && S.page === 'timeline') { renderTracks(); renderEditor(); renderSavebar(); }
-  if (S.page === 'logs') { renderLogRows(true); if (!S.logs) refreshLogs(); }
+  if (S.page === 'logs') { renderLogRows(true); if (S.logLevel === 'USAGE' ? !S.usage : !S.logs) refreshLogs(); }
   if (keep) {
     const el = document.getElementById(keep.id);
     if (el) { el.focus(); try { if (keep.a != null) el.setSelectionRange(keep.a, keep.b); } catch (e) { /* not text */ } }
@@ -1249,8 +1249,9 @@ async function saveSettingsPage() {
 
 
 /* ---------------------------------------------------------------- 运行日志 */
-const LOG_LEVELS = [['DEBUG', '全部'], ['INFO', '运行信息'], ['WARNING', '警告和报错'], ['ERROR', '只看报错']];
+const LOG_LEVELS = [['DEBUG', '全部'], ['INFO', '运行信息'], ['WARNING', '警告和报错'], ['ERROR', '只看报错'], ['USAGE', 'Token 用量']];
 async function refreshLogs() {
+  if (S.logLevel === 'USAGE') return refreshUsage();
   try {
     const d = await api(`/api/logs?${new URLSearchParams({ level: S.logLevel, q: S.logQ, limit: 800 })}`);
     S.logs = d; S.logCounts = d.counts;
@@ -1273,18 +1274,64 @@ function renderLogBadge() {
   b.textContent = err > 0 ? (err > 99 ? '99+' : err) : (warn > 99 ? '99+' : warn);
   $('#logsBtn').title = err > 0 ? tr('有 {0} 条新报错', err) : tr('有 {0} 条新警告', warn);
 }
+/* ---- Token 用量：logs/usage.jsonl 的汇总 */
+async function refreshUsage() {
+  try { S.usage = await api('/api/usage?days=30'); }
+  catch (e) { S.usage = { error: /not found|404/i.test(e.message) ? tr('后端还是旧版本，没有用量接口。重启 studio 后再看。') : e.message }; }
+  if (S.page === 'logs' && S.logLevel === 'USAGE') renderUsage();
+}
+const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 1 : 2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n || 0));
+function usageTile(label, x) {
+  return `<div class="utile"><span>${tr(label)}</span><b title="${(x.in + x.out).toLocaleString()}">${fmtTok(x.in + x.out)}</b>
+    <small>${tr('输入 {0} · 输出 {1}', fmtTok(x.in), fmtTok(x.out))} · ${tr('{0} 次调用', x.calls)}</small></div>`;
+}
+function usageTable(title, rows, nameLabel) {
+  if (!rows.length) return '';
+  const max = Math.max(...rows.map((r) => r.in + r.out), 1);
+  return `<section class="ucard"><h3>${tr(title)}</h3><table class="utable"><thead><tr><th>${tr(nameLabel)}</th><th>${tr('调用')}</th><th>${tr('输入')}</th><th>${tr('输出')}</th><th>${tr('合计')}</th></tr></thead><tbody>
+    ${rows.slice(0, 12).map((r) => `<tr><td><span class="ubar" style="--w:${Math.round(100 * (r.in + r.out) / max)}%"></span><span class="uname">${esc(tr(r.name))}</span></td><td>${r.calls}</td><td>${fmtTok(r.in)}</td><td>${fmtTok(r.out)}</td><td><b>${fmtTok(r.in + r.out)}</b></td></tr>`).join('')}
+  </tbody></table></section>`;
+}
+function renderUsage() {
+  const box = $('#logBox'); if (!box) return;
+  const u = S.usage;
+  if (!u) { box.innerHTML = `<div class="muted" style="padding:16px">${tr('正在读取…')}</div>`; return; }
+  if (u.error) { box.innerHTML = `<div class="err" style="margin:16px">${esc(u.error)}</div>`; return; }
+  if (!u.records) {
+    box.innerHTML = `<div class="empty" style="margin:16px"><h2>${tr('还没有用量记录')}</h2><p style="margin:0;max-width:520px;line-height:1.7">${tr('从这个版本开始，每次调用 Claude 都会记一笔（看片、编故事、改剪辑、写拍摄脚本）。离线模拟不花钱，不记。')}</p></div>`;
+    return;
+  }
+  const T = u.totals, maxDay = Math.max(...u.by_day.map((d) => d.in + d.out), 1);
+  box.innerHTML = `<div class="usage">
+    <div class="utiles">${usageTile('今天', T.today)}${usageTile('近 7 天', T.week)}${usageTile('本月', T.month)}${usageTile('全部', T.all)}</div>
+    <section class="ucard"><div class="toolbar" style="justify-content:space-between"><h3>${tr('近 30 天')}</h3>
+      <span class="ulegend"><i class="in"></i>${tr('输入')} <i class="out"></i>${tr('输出')}</span></div>
+      <div class="uchart" role="img" aria-label="${tr('近 30 天每天的 token 用量')}">${u.by_day.map((d) => {
+        const tot = d.in + d.out, h = Math.round(100 * tot / maxDay), hi = tot ? Math.round(h * d.in / tot) : 0;
+        return `<div class="ucol" title="${esc(d.day)} · ${tr('输入 {0} · 输出 {1}', d.in.toLocaleString(), d.out.toLocaleString())} · ${tr('{0} 次调用', d.calls)}">
+          <div class="ustack" style="height:${h}%"><i class="out" style="flex:${h - hi}"></i><i class="in" style="flex:${hi}"></i></div>
+          <span>${d.day.slice(8)}</span></div>`;
+      }).join('')}</div></section>
+    <div class="ugrid">${usageTable('按项目', u.by_project, '项目')}${usageTable('按任务', u.by_step, '任务')}${usageTable('按模型', u.by_model, '模型')}</div>
+    <section class="ucard"><h3>${tr('最近的任务')}</h3><table class="utable"><thead><tr><th>${tr('开始时间')}</th><th>${tr('任务')}</th><th>${tr('项目')}</th><th>${tr('调用')}</th><th>${tr('输入')}</th><th>${tr('输出')}</th></tr></thead><tbody>
+      ${u.tasks.map((x) => `<tr><td class="mono">${esc((x.started || '').replace('T', ' ').slice(5, 16))}</td><td>${esc(tr(x.job) || '—')}</td><td>${esc(x.project || '—')}</td><td>${x.calls}</td><td>${fmtTok(x.in)}</td><td>${fmtTok(x.out)}</td></tr>`).join('')}
+    </tbody></table></section>
+    <p class="help">${tr('输入包含图片（静帧）和提示文字；离线模拟不计。记录在 {0}。', `<span class="mono">${esc(u.file)}</span>`)}</p>
+  </div>`;
+}
 function viewLogs() {
   const c = S.logCounts || {};
+  const usage = S.logLevel === 'USAGE';
   return `<div class="logs-wrap">
     <div class="logs-head">
       <h1>${tr('运行日志')}</h1>
-      <div class="seg" role="group" aria-label="${tr('显示哪些日志')}" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+      <div class="seg" role="group" aria-label="${tr('显示哪些日志')}" style="grid-template-columns:repeat(5,minmax(0,1fr))">
         ${LOG_LEVELS.map(([v, l]) => `<button type="button" data-loglevel="${v}" aria-pressed="${S.logLevel === v}">${tr(l)}</button>`).join('')}</div>
-      <label for="logSearch" class="sr">${tr('搜索日志')}</label>
-      <input id="logSearch" class="field" type="search" style="width:240px;min-height:38px" placeholder="${tr('搜索：项目名、401、镜头 id…')}" value="${esc(S.logQ)}">
+      ${usage ? '' : `<label for="logSearch" class="sr">${tr('搜索日志')}</label>
+      <input id="logSearch" class="field" type="search" style="width:240px;min-height:38px" placeholder="${tr('搜索：项目名、401、镜头 id…')}" value="${esc(S.logQ)}">`}
       <label class="check" style="min-height:38px"><input type="checkbox" id="logAuto" ${S.logAuto ? 'checked' : ''}>${tr('自动刷新')}</label>
     </div>
-    <div class="logs-box" id="logBox"></div>
+    <div class="logs-box ${usage ? 'usage-box' : ''}" id="logBox"></div>
     <div class="logs-foot">
       <span>${countsHtml(c)}</span>
       <span style="flex:1">${tr('日志文件：{0}（同样的内容也显示在运行 studio 的终端里）', `<span class="mono">${esc((S.logs && S.logs.file) || 'logs/vlogai.log')}</span>`)}</span>
@@ -1304,6 +1351,7 @@ function logRowHtml(e) {
     <div class="m">${src}${rest ? `<details><summary>${esc(first)}</summary><pre>${esc(rest)}</pre></details>` : esc(first)}</div></div>`;
 }
 function renderLogRows(force) {
+  if (S.logLevel === 'USAGE') return renderUsage();
   const box = $('#logBox'); if (!box) return;
   if (!S.logs) { box.innerHTML = `<div class="muted" style="padding:16px">${tr('正在读取…')}</div>`; return; }
   if (S.logs.error) { box.innerHTML = `<div class="err" style="margin:16px">${esc(tr('读取日志失败：{0}。如果刚更新过代码，请重启 studio。', S.logs.error))}</div>`; return; }
@@ -1378,7 +1426,10 @@ document.addEventListener('click', async (e) => {
   }
   if (d.restore) return restore(+d.restore);
   if (d.uilang) return setUiLang(d.uilang);
-  if (d.loglevel) { S.logLevel = d.loglevel; store('loglevel', S.logLevel); document.querySelectorAll('[data-loglevel]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.loglevel === S.logLevel)); return refreshLogs(); }
+  if (d.loglevel) {
+    const switching = (d.loglevel === 'USAGE') !== (S.logLevel === 'USAGE');   // 用量和日志的版面不一样，要整页重画
+    S.logLevel = d.loglevel; store('loglevel', S.logLevel);
+    if (switching) { render(); return refreshLogs(); } document.querySelectorAll('[data-loglevel]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.loglevel === S.logLevel)); return refreshLogs(); }
   if (d.scroll) { const el = document.getElementById('sec-' + d.scroll); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   if (d.set) { setDraft(d.set, d.val); return render(); }
   if (d.toggle) { setDraft(d.toggle, !S.draft[d.toggle]); return render(); }

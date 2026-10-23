@@ -17,7 +17,7 @@ import re
 import time
 from pathlib import Path
 
-from . import config
+from . import config, usage as usage_log
 
 class FatalError(RuntimeError):
     """重试也没用、剩下的镜头也不用再跑的错误（Key 不对、余额不足、模型名写错……）。
@@ -199,7 +199,7 @@ class ClaudeLLM:
         print(f"[vlogai] 模型：看片 {self.describe_model} · 编故事 {self.story_model}")
         self.usage = {"input_tokens": 0, "output_tokens": 0}
 
-    def _call(self, model: str, system: str, content: list, max_tokens: int) -> str:
+    def _call(self, model: str, system: str, content: list, max_tokens: int, step: str = "plan") -> str:
         tries = 1 + int(config.get("api_retries"))      # 设置页：API 出错重试几次
         for attempt in range(tries):
             try:
@@ -208,6 +208,7 @@ class ClaudeLLM:
                     messages=[{"role": "user", "content": content}])
                 self.usage["input_tokens"] += resp.usage.input_tokens
                 self.usage["output_tokens"] += resp.usage.output_tokens
+                usage_log.record(model, step, resp.usage)     # 记到 logs/usage.jsonl，网页“Token 用量”里看
                 return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
             except Exception as e:  # noqa: BLE001
                 fatal = fatal_from(e, model)
@@ -226,7 +227,7 @@ class ClaudeLLM:
             content.append({"type": "image",
                             "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
         content.append({"type": "text", "text": prompt})
-        return extract_json(self._call(self.describe_model, system, content, 900))
+        return extract_json(self._call(self.describe_model, system, content, 900, step="describe"))
 
     def plan(self, system: str, prompt: str, max_tokens: int = 16000) -> dict:
         text = self._call(self.story_model, system, [{"type": "text", "text": prompt}], max_tokens)

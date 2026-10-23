@@ -647,6 +647,9 @@ class Handler(BaseHTTPRequestHandler):
                                                                  int(q.get("limit", ["800"])[0])),
                                   "counts": applog.COUNTS, "file": str(applog.LOG_FILE),
                                   "level": config.get("log_level")})
+            if path == "/api/usage":
+                from .. import usage
+                return self.json(usage.summary(max(1, min(366, int(q.get("days", ["30"])[0])))))
             if path == "/api/logs/summary":
                 return self.json({"counts": applog.COUNTS})
             if path == "/api/ls":

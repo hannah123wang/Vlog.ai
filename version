@@ -1,7 +1,7 @@
 version_number: v 1.2
 
 2026 Oct 23
-v 1.2 · settings
+v 1.2 · settings + token usage
 
 == 1. 设置页：更多参数可以手动调（config.py、app.js） ==
 - 以前写死在代码里的参数都搬到了设置页，每个数字框旁边显示允许范围，改过的项有“默认 x”按钮一键恢复；
@@ -15,9 +15,17 @@ v 1.2 · settings
 - 修复：命令行渲染以前完全不看设置页（音乐音量、压低音乐、字幕、字体、1080p 都用固定值）；命令行的并行数和 Whisper 模型也改为默认用设置页的
 - API Key 的创建链接改成 platform.claude.com
 
-== 2. 改动的文件 ==
-vlogai/config.py、frames.py、probe.py、protect.py、story.py、beats.py、render.py、shootplan.py、llm.py、cli.py
-vlogai/studio/server.py（GET /api/settings 增加 rules：每项的取值范围）
+== 2. Token 用量统计（新增 vlogai/usage.py） ==
+- 每次调用 Claude 都记一笔到 logs/usage.jsonl：时间、任务、项目、看片还是编故事、模型、输入 / 输出 tokens
+- “运行日志”页新增“Token 用量”标签：今天 / 近 7 天 / 本月 / 全部的合计，近 30 天每天的柱状图（输入、输出分开），
+  按项目、按任务、按模型的排行，以及最近的任务明细
+- 每个任务结束时，运行日志里多一行“Token 用量「看素材」 项目 xx：调用 n 次，输入 …，输出 …”
+- 命令行运行也会记（任务名是“命令行 describe”这样）；离线模拟不花钱，不记
+- 只统计从这个版本开始的调用
+
+== 3. 改动的文件 ==
+vlogai/usage.py（新增）、config.py、frames.py、probe.py、protect.py、story.py、beats.py、render.py、shootplan.py、llm.py、cli.py
+vlogai/studio/server.py（GET /api/settings 增加 rules：每项的取值范围；新增 GET /api/usage）、jobs.py
 vlogai/studio/web/app.js、i18n.js、style.css
 API.md
 

@@ -91,6 +91,8 @@ def main(argv=None):
     if args.cmd != "plan":              # 写拍摄脚本不需要 ffmpeg（出发前的电脑上可能还没装）
         require_ffmpeg()
     p = _project(args)
+    from . import usage
+    usage.set_task(f"命令行 {args.cmd}", p.root.name)
     o = _opts(args, p)
     lang = LANGS[o["lang"]]
     target = float(o["minutes"]) * 60
