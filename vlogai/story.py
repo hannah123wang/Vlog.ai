@@ -10,6 +10,7 @@ from datetime import datetime
 
 from .common import Project, log, read_json, write_json
 from .describe import load_logged_shots
+from .protect import enforce, must_include_block, protected
 
 SYSTEM = """You are a senior documentary/travel-vlog editor. From a log of raw shots you build a
 rough cut that feels like a story, not a slideshow. Craft rules:
@@ -23,6 +24,9 @@ rough cut that feels like a story, not a slideshow. Craft rules:
   Shots with q < 0.25 are technically bad — use only if irreplaceable.
 - Use shots with worthwhile speech as anchors (keep_audio=true) — they carry the narrative.
 - Hit the target length within ±10%.
+- MUST-INCLUDE: the request lists shots that are protected (the creator's face, the two of them
+  together, signature scenery). Every one of them has to appear somewhere it fits. Place them where
+  they belong in the story — do not dump them at the end.
 Reply with ONLY JSON, no prose."""
 
 PROMPT = """Trip brief from the creator: {brief}
@@ -34,6 +38,9 @@ Write titles, captions and 'why' notes in {lang}.
 Shot log. Fields: id, day, time, dur (s), q (technical quality 0-1), hl (highlight 1-10),
 type, roles, place, mood, sum, best (best in/out, s relative to shot start), speech.
 <shots_json>{shots}</shots_json>
+
+Shots that MUST appear in the cut (protected — the creator will notice if they are missing):
+<must_include>{must_include}</must_include>
 
 Return JSON:
 {{
@@ -60,6 +67,9 @@ Write text in {lang}.
 
 <current_story>{story}</current_story>
 <shots_json>{shots}</shots_json>
+
+Shots that MUST still appear after your revision:
+<must_include>{must_include}</must_include>
 
 Return the full revised story in the same JSON format (title, logline, chapters, timeline)."""
 
@@ -144,11 +154,14 @@ def build_story(project: Project, llm, brief: str, target_seconds: float, lang: 
     if not shots:
         raise SystemExit("还没有镜头日志，先运行 describe")
     pacing, n_seg = _pacing(target_seconds)
+    prot = protected(project, shots, target_seconds)
     log(f"AI 编故事：{len(shots)} 个镜头 → 目标 {target_seconds/60:.1f} 分钟，约 {n_seg} 个片段…")
     prompt = PROMPT.format(brief=brief or "(none — infer the story from the footage)",
                            target=int(target_seconds), lang=lang, pacing=pacing, n_segments=n_seg,
-                           shots=json.dumps(_compact(shots), ensure_ascii=False))
+                           shots=json.dumps(_compact(shots), ensure_ascii=False),
+                           must_include=must_include_block(prot, shots))
     plan = _validate(llm.plan(SYSTEM, prompt, max_tokens=_max_tokens(n_seg)), shots)
+    plan = enforce(plan, prot, shots)
     _save(project, plan, f"initial; brief={brief!r}")
     return plan
 
@@ -165,12 +178,15 @@ def revise_story(project: Project, llm, instruction: str, target_seconds: float,
         log("  离线模式无法理解修改指令，仅重新校验现有 story.json")
         plan = _validate(slim, shots)
     else:
+        prot = protected(project, shots, target_seconds)
         pacing, n_seg = _pacing(target_seconds)
         prompt = REVISE_PROMPT.format(instruction=instruction, target=int(target_seconds), lang=lang,
                                       pacing=pacing,
                                       story=json.dumps(slim, ensure_ascii=False),
-                                      shots=json.dumps(_compact(shots), ensure_ascii=False))
+                                      shots=json.dumps(_compact(shots), ensure_ascii=False),
+                                      must_include=must_include_block(prot, shots))
         plan = _validate(llm.plan(SYSTEM, prompt, max_tokens=_max_tokens(n_seg)), shots)
+        plan = enforce(plan, prot, shots)
     _save(project, plan, f"revise: {instruction}")
     return plan
 

@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import describe, export_xml, frames, probe, render, story, storyboard, transcribe
+from . import describe, export_xml, frames, probe, render, shootplan, story, storyboard, transcribe
 from . import __version__
 from .common import Project, log, require_ffmpeg
 from .llm import get_llm
@@ -30,6 +30,7 @@ def _opts(args, p: Project) -> dict:
         lang=getattr(args, "lang", None) or s.get("lang", "zh"),
         music=str(Path(args.music).expanduser().resolve()) if getattr(args, "music", None) else s.get("music"),
         vertical=args.vertical if getattr(args, "vertical", None) is not None else s.get("vertical", False),
+        subject=getattr(args, "subject", None) or s.get("subject", ""),
     )
 
 
@@ -55,6 +56,10 @@ def main(argv=None):
         sp.add_argument("--font", help="字幕字体文件路径")
         sp.add_argument("--whisper", default="small", help="Whisper 模型大小 tiny/base/small/medium")
         sp.add_argument("--workers", type=int, default=4)
+        sp.add_argument("--subject", help='这部片子的主人公，例如 "我（长发女生）和男朋友 James"。'
+                                          "用来判断哪些镜头必须保留")
+        sp.add_argument("--days", type=int, default=3, help="plan 命令用：拍几天")
+        sp.add_argument("--gear", default="", help="plan 命令用：有什么设备，例如 iPhone + DJI 无人机")
         return sp
 
     add("run", "一键跑完整流程", footage=True)
@@ -69,6 +74,7 @@ def main(argv=None):
     add("board", "生成 storyboard.html 故事板")
     add("render", "6 渲染预览 mp4")
     add("export", "7 导出 Resolve/Premiere 时间线 XML")
+    add("plan", "0 出发前：AI 写拍摄脚本（不需要素材）")
 
     args = ap.parse_args(argv)
     from . import applog, config
@@ -82,9 +88,16 @@ def main(argv=None):
     o = _opts(args, p)
     lang = LANGS[o["lang"]]
     target = float(o["minutes"]) * 60
-    llm = get_llm(args.mock) if args.cmd in ("run", "describe", "story", "revise") else None
+    llm = get_llm(args.mock) if args.cmd in ("run", "describe", "story", "revise", "plan") else None
     log(f"项目文件夹：{p.root}")
 
+    if args.cmd == "plan":
+        if args.mock:
+            shootplan.mock_plan(p, o["brief"], args.days)
+        else:
+            shootplan.make_plan(p, llm, o["brief"], args.days, float(o["minutes"]), args.gear, lang)
+        shootplan.plan_html(p)
+        return
     if args.cmd in ("run", "scan"):
         probe.scan(args.footage, p)
     if args.cmd in ("run", "frames"):
@@ -92,7 +105,7 @@ def main(argv=None):
     if args.cmd in ("run", "transcribe"):
         transcribe.transcribe(p, args.whisper)
     if args.cmd in ("run", "describe"):
-        describe.describe_all(p, llm, lang=lang, workers=args.workers)
+        describe.describe_all(p, llm, lang=lang, workers=args.workers, subject=o.get("subject", ""))
     if args.cmd in ("run", "story"):
         story.build_story(p, llm, o["brief"], target, lang)
     if args.cmd == "revise":
