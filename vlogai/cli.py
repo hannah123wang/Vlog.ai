@@ -83,7 +83,8 @@ def main(argv=None):
         sys.stdout = applog.TeeStdout(sys.stdout)
     log(f"vlogai 版本 {__version__}")
     applog.log.info(f"命令行：vlogai {' '.join(argv if argv is not None else sys.argv[1:])}")
-    require_ffmpeg()
+    if args.cmd != "plan":              # 写拍摄脚本不需要 ffmpeg（出发前的电脑上可能还没装）
+        require_ffmpeg()
     p = _project(args)
     o = _opts(args, p)
     lang = LANGS[o["lang"]]

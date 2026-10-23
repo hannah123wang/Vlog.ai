@@ -7,11 +7,12 @@ const S = {
   shots: [], byId: {}, outline: null, story: null, versions: [],
   page: 'footage',
   fsel: null, fframe: null, day: 'all',
-  filters: { q: '', star: false, talk: false, vert: false, hideBlur: false },
+  filters: { q: '', star: false, talk: false, vert: false, hideBlur: false, prot: false },
   outlineDirty: false,
   tl: null, tlDirty: false, tsel: 0,
   job: null, jobLines: [], jobSince: 0, jobOpen: false, jobHidden: false,
   hd: false, whisper: false,
+  plan: null, planEdit: null, planDirty: false, planDay: 0,
   logs: null, logLevel: 'INFO', logQ: '', logAuto: true, logCounts: null,
   cfg: null, cfgError: null, draft: null, cfgDirty: false, newKey: '', showKey: false, keyTest: null,
 };
@@ -34,11 +35,20 @@ function store(k, v) { try { if (v === undefined) return JSON.parse(localStorage
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
-  const r = await fetch(path, opt);
+  let r;
+  try { r = await fetch(path, opt); } catch (e) { const err = new Error(e.message); err.offline = true; throw err; }
   const d = await r.json().catch(() => ({ error: tr('服务器没有返回 JSON') }));
   if (!r.ok || d.error) throw new Error(trServer(d.error) || tr('请求失败 ({0})', r.status));
   return d;
 }
+/* /api/job 的 error 字段是“上一个任务为什么失败”，不是这次请求失败，所以不能走 api()。 */
+async function getJob(since = 0) {
+  let r;
+  try { r = await fetch(`/api/job?since=${since}`); } catch (e) { const err = new Error(e.message); err.offline = true; throw err; }
+  if (!r.ok) throw new Error(tr('请求失败 ({0})', r.status));
+  return r.json();
+}
+const linkify = (html) => html.replace(/https?:\/\/[^\s，。；、）)<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
 function toast(msg, bad) {
   const p = $('#jobPanel');
   p.hidden = false; p.className = 'job ' + (bad ? 'fail' : 'done');
@@ -79,7 +89,8 @@ async function browse(kind, start) {
     <div class="browse-list" id="bList"></div>
     ${kind === 'audio' ? `<label class="section"><span class="label">${tr('音乐文件的完整路径（mp3 / m4a / wav）')}</span>
       <input class="field mono" id="bFile" style="font-size:12px" placeholder="${tr('比如')} D:\\Music\\bgm.mp3"></label>` : ''}
-    ${isNew ? `<label class="section"><span class="label">${tr('项目名称（可留空，默认用文件夹名）')}</span><input class="field" id="bName" autocomplete="off"></label>` : ''}
+    ${isNew ? `<label class="section"><span class="label">${tr('项目名称（可留空，默认用文件夹名）')}</span><input class="field" id="bName" autocomplete="off"></label>
+      <button type="button" class="ghost sm" id="bPlanOnly" style="align-self:flex-start">${tr('还没有素材？先建项目写拍摄脚本')}</button>` : ''}
     <div class="row-end"><span class="muted" id="bInfo" style="flex:1"></span><button class="ghost" value="">${tr('取消')}</button>
       <button class="btn" type="button" id="bPick">${kind === 'audio' ? tr('使用这个文件') : isNew ? tr('开始扫描') : tr('选择这个文件夹')}</button></div>`;
   const r = await modal(html, (b, close) => {
@@ -103,6 +114,7 @@ async function browse(kind, start) {
       else if (t.dataset.go) load(t.dataset.go);
       else if (t.id === 'bUp' && cur) load(cur.parent);
       else if (t.id === 'bGo') load($('#bPath', b).value);
+      else if (t.id === 'bPlanOnly') { chosen = ''; name = $('#bName', b).value.trim(); close('plan'); }
       else if (t.id === 'bPick') {
         if (kind === 'audio') {
           chosen = $('#bFile', b).value.trim().replace(/^"|"$/g, '');
@@ -119,15 +131,19 @@ async function browse(kind, start) {
     }
     load(kind === 'audio' ? (start ? start.replace(/[\\/][^\\/]*$/, '') : S.env.home) : (start || S.env.home));
   });
+  if (r === 'plan') return { planOnly: true, name };
   return r === 'ok' ? { path: chosen, name } : null;
 }
 
 /* ---------------------------------------------------------------- data */
 async function loadProjects() { S.projects = (await api('/api/projects')).projects; }
 async function loadProject() {
-  if (!S.pid) { S.p = null; S.shots = []; S.byId = {}; S.outline = null; S.story = null; S.versions = []; return; }
-  const [p, sh, ol, st, vs] = await Promise.all([
-    api(P()), api(`${P()}/shots`), api(`${P()}/outline`), api(`${P()}/story`), api(`${P()}/versions`)]);
+  if (!S.pid) { S.p = null; S.shots = []; S.byId = {}; S.outline = null; S.story = null; S.versions = []; S.plan = null; S.planEdit = null; return; }
+  const [p, sh, ol, st, vs, pl] = await Promise.all([
+    api(P()), api(`${P()}/shots`), api(`${P()}/outline`), api(`${P()}/story`), api(`${P()}/versions`),
+    api(`${P()}/shootplan`).catch(() => ({}))]);
+  S.plan = pl && pl.days ? pl : null;
+  if (!S.planDirty) planCopy();
   S.p = p; S.shots = sh.shots; S.byId = Object.fromEntries(S.shots.map((s) => [s.id, s]));
   S.story = st.timeline && st.timeline.length ? st : null;
   S.versions = vs.versions;
@@ -148,7 +164,7 @@ function resetTimeline() {
 }
 async function switchProject(pid) {
   S.pid = pid; store('project', pid);
-  S.fsel = null; S.day = 'all'; S.tsel = 0; S.outlineDirty = false; S.tlDirty = false;
+  S.fsel = null; S.day = 'all'; S.tsel = 0; S.outlineDirty = false; S.tlDirty = false; S.planDirty = false; S.planDay = 0;
   await loadProject();
   render();
 }
@@ -170,7 +186,7 @@ let pollTimer = null, tick = 0;
 async function pollJob() {
   clearTimeout(pollTimer);
   let j;
-  try { j = await api(`/api/job?since=${S.jobSince}`); } catch (e) { pollTimer = setTimeout(pollJob, 2000); return; }
+  try { j = await getJob(S.jobSince); } catch (e) { pollTimer = setTimeout(pollJob, 2000); return; }
   S.jobSince = j.line_count || 0;
   S.jobLines = S.jobLines.concat(j.lines || []).slice(-400);
   const was = S.job && S.job.status;
@@ -213,9 +229,9 @@ function renderHeader() {
   $('#projectSelect').innerHTML = (S.projects.length ? S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === S.pid ? 'selected' : ''}>${esc(p.name)}</option>`).join('') : `<option value="">${tr('还没有项目')}</option>`)
     + `<option value="__new">${tr('＋ 新建项目…')}</option>`;
   const p = S.p || {};
-  const steps = [['footage', '素材', p.logged > 0], ['story', '故事线', !!p.has_outline], ['timeline', '时间线', !!p.has_story], ['export', '导出', !!p.has_xml]];
+  const steps = [['plan', '拍摄脚本', !!p.has_plan], ['footage', '素材', p.logged > 0], ['story', '故事线', !!p.has_outline], ['timeline', '时间线', !!p.has_story], ['export', '导出', !!p.has_xml]];
   $('#steps').innerHTML = steps.map(([id, name, done], i) => `<a href="#${id}" ${S.page === id ? 'aria-current="page"' : ''}>
-    ${done && S.page !== id ? '<span class="done">✓</span>' : `<span class="n">${i + 1}</span>`}${tr(name)}</a>`).join('');
+    ${done && S.page !== id ? '<span class="done">✓</span>' : `<span class="n">${i}</span>`}${tr(name)}</a>`).join('');
   $('#mockToggle').checked = mockOn();
   if (S.page === 'settings') $('#gearBtn').setAttribute('aria-current', 'page'); else $('#gearBtn').removeAttribute('aria-current');
   if (S.page === 'logs') $('#logsBtn').setAttribute('aria-current', 'page'); else $('#logsBtn').removeAttribute('aria-current');
@@ -236,7 +252,10 @@ function renderJob() {
   p.className = 'job' + (j.status === 'error' ? ' fail' : j.status === 'done' ? ' done' : '');
   $('#jobName').textContent = j.status === 'running' ? tr(j.name) + '…' : j.status === 'error' ? tr('{0}失败', tr(j.name)) : tr('{0}完成', tr(j.name));
   const last = S.jobLines.filter((l) => !l.startsWith('Traceback')).slice(-1)[0] || '';
-  $('#jobLast').textContent = j.status === 'error' ? trServer(j.error) : (j.total ? `${j.done}/${j.total} · ` : '') + trServer(last.replace('[vlogai] ', ''));
+  if (j.status === 'error') $('#jobLast').innerHTML = linkify(esc(trServer(j.error)));
+  else $('#jobLast').textContent = (j.total ? `${j.done}/${j.total} · ` : '') + trServer(last.replace('[vlogai] ', ''));
+  if (j.status === 'error' && j.started) store('seenJobError', j.started);
+  $('#jobLast').classList.toggle('wrap', j.status === 'error');
   const bar = $('#jobBar'), fill = $('#jobFill');
   bar.hidden = j.status !== 'running';
   bar.classList.toggle('indet', j.pct == null);
@@ -253,13 +272,13 @@ function renderJob() {
 
 function render() {
   const page = (location.hash || '#footage').slice(1);
-  S.page = ['footage', 'story', 'timeline', 'export', 'settings', 'logs'].includes(page) ? page : 'footage';
+  S.page = ['plan', 'footage', 'story', 'timeline', 'export', 'settings', 'logs'].includes(page) ? page : 'footage';
   document.body.classList.toggle('on-settings', S.page === 'settings');
   renderHeader();
   const active = document.activeElement;
   const keep = active && active.id ? { id: active.id, a: active.selectionStart, b: active.selectionEnd } : null;
-  $('#app').innerHTML = S.page === 'settings' ? viewSettings() : S.page === 'logs' ? viewLogs() : !S.pid ? viewWelcome() : { footage: viewFootage, story: viewStory, timeline: viewTimeline, export: viewExport }[S.page]();
-  if (S.pid && S.page === 'timeline') { renderTracks(); renderEditor(); renderSavebar(); }
+  $('#app').innerHTML = S.page === 'settings' ? viewSettings() : S.page === 'logs' ? viewLogs() : !S.pid || !S.p ? viewWelcome() : { plan: viewPlan, footage: viewFootage, story: viewStory, timeline: viewTimeline, export: viewExport }[S.page]();
+  if (S.pid && S.p && S.page === 'timeline') { renderTracks(); renderEditor(); renderSavebar(); }
   if (S.page === 'logs') { renderLogRows(true); if (!S.logs) refreshLogs(); }
   if (keep) {
     const el = document.getElementById(keep.id);
@@ -269,8 +288,185 @@ function render() {
 
 function viewWelcome() {
   return `<div class="page"><div class="content"><div class="empty"><h2>${tr('把一堆素材，变成一个有故事的片子')}</h2>
-    <p style="margin:0;max-width:480px;line-height:1.7">${tr('选一个放着这趟旅行视频的文件夹（子文件夹也行）。AI 会逐个镜头看一遍，你写下想讲的故事，它用真实拍到的素材搭出结构，再剪成一条可以继续编辑的时间线。')}</p>
-    <button type="button" class="btn" data-act="new-project" ${dis()}>${tr('选择素材文件夹')}</button></div></div></div>`;
+    <div class="welcome-grid">
+      <section class="ex-card"><h3 style="font-size:18px">${tr('还没出发？')}</h3>
+        <p>${tr('先写一份拍摄脚本：AI 帮你想好每天要拍哪些镜头，回来之后剪起来更顺。')}</p>
+        <div class="foot"><button type="button" class="ghost outline" data-act="new-plan-project" ${dis()}>${tr('先写拍摄脚本')}</button></div></section>
+      <section class="ex-card"><h3 style="font-size:18px">${tr('已经拍完了？')}</h3>
+        <p>${tr('选一个放着这趟旅行视频的文件夹（子文件夹也行）。AI 会逐个镜头看一遍，你写下想讲的故事，它用真实拍到的素材搭出结构，再剪成一条可以继续编辑的时间线。')}</p>
+        <div class="foot"><button type="button" class="btn" data-act="new-project" ${dis()}>${tr('选择素材文件夹')}</button></div></section>
+    </div></div></div></div>`;
+}
+
+
+/* ---------------------------------------------------------------- 0 拍摄脚本 */
+const FRAMINGS = ['wide', 'medium', 'close-up', 'detail', 'selfie', 'pov', 'drone'];
+const SHIELD = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z"/></svg>';
+
+function planCopy() { S.planEdit = S.plan ? JSON.parse(JSON.stringify(S.plan)) : null; S.planDirty = false; }
+function planStats(pl) {
+  const shots = (pl.days || []).flatMap((d) => d.shots || []);
+  const done = new Set(pl.done || []);
+  const must = shots.filter((s) => s.must_have);
+  return { total: shots.length, done: shots.filter((s) => done.has(s.shot_id)).length,
+    must: must.length, mustDone: must.filter((s) => done.has(s.shot_id)).length };
+}
+function planProgressHtml() {
+  const st = planStats(S.planEdit);
+  const pct = st.total ? Math.round((100 * st.done) / st.total) : 0;
+  return `<div class="toolbar" style="justify-content:space-between"><span>${tr('已拍 {0} / {1}', st.done, st.total)}</span>
+      <span class="${st.mustDone < st.must ? 'muted' : 'ok-text'}">${tr('必拍 {0} / {1}', st.mustDone, st.must)}</span></div>
+    <div class="bar"><i style="width:${pct}%"></i></div>`;
+}
+function planShotHtml(s, di, si) {
+  const done = (S.planEdit.done || []).includes(s.shot_id);
+  return `<li class="pshot ${done ? 'done' : ''} ${s.must_have ? 'must' : ''}" data-pday="${di}" data-pidx="${si}">
+    <label class="pcheck"><input type="checkbox" data-pcheck="${esc(s.shot_id)}" ${done ? 'checked' : ''} aria-label="${tr('拍完了')}"></label>
+    <div class="pbody">
+      <div class="ppics ${S.planEdit.vertical ? 'v' : ''}">
+        ${s.sketch_svg === undefined ? '' : `<div class="psketch" title="${tr('构图草图')}">${s.sketch_svg || `<span class="note">${tr('保存后更新草图')}</span>`}</div>`}
+        ${(s.ref_urls || []).map((u, ri) => `<div class="pref"><a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="${tr('参考图')}" loading="lazy"></a>
+          <button type="button" class="pref-del" data-prefdel="${esc((s.refs || [])[ri] || '')}" aria-label="${tr('删除这张参考图')}">×</button></div>`).join('')}
+        ${(s.refs || []).length < 3 ? `<button type="button" class="pref-add" data-prefadd title="${tr('也可以把图片拖到这里，或者点一下这个镜头再粘贴')}">${tr('+ 参考图')}</button>` : ''}
+      </div>
+      <div class="prow">
+        <select data-pf="framing" aria-label="${tr('景别')}">${FRAMINGS.concat(FRAMINGS.includes(s.framing) || !s.framing ? [] : [s.framing])
+          .map((f) => `<option value="${esc(f)}" ${f === s.framing ? 'selected' : ''}>${esc(shotType(f) || f)}</option>`).join('')}</select>
+        <input data-pf="hold" value="${esc(s.hold || '')}" placeholder="${tr('拍多久')}" aria-label="${tr('拍多久')}">
+        <button type="button" class="chip pmust" data-pmust aria-pressed="${!!s.must_have}">${tr('必拍')}</button>
+        ${s.how ? `<span class="phow">${esc(s.how.split(' · ').map((x) => tr(x)).join(' · '))}</span>` : ''}
+        <span class="mono muted" style="font-size:11px;margin-left:auto">${esc(s.shot_id || '')}</span>
+      </div>
+      <textarea data-pf="what" rows="2" aria-label="${tr('拍什么')}" placeholder="${tr('拍什么：画面里有什么、发生什么')}">${esc(s.what || '')}</textarea>
+      ${s.beat || s.why ? `<div class="pwhy">${esc(s.beat || '')}${s.beat && s.why ? ' — ' : ''}${esc(s.why || '')}</div>` : ''}
+    </div>
+    <button type="button" class="ghost sm danger" data-pdel aria-label="${tr('删除这个镜头')}">${tr('删除')}</button>
+  </li>`;
+}
+function planSaveHtml() {
+  return S.planDirty ? `<div class="savebar"><span>${tr('有未保存的修改')}</span>
+    <button type="button" class="ghost sm" data-act="plan-discard">${tr('放弃')}</button>
+    <button type="button" class="btn sm" data-act="plan-save">${tr('保存')}</button></div>` : '';
+}
+function viewPlan() {
+  const s = S.p.settings || {};
+  const pl = S.planEdit;
+  const minutes = +(s.minutes || 3);
+  const lens = [1, 2, 4, 8];
+  const custom = !lens.includes(minutes);
+  const days = (pl && pl.days) || [];
+  S.planDay = clamp(S.planDay || 0, 0, Math.max(0, days.length - 1));
+  const day = days[S.planDay];
+  return `<div class="page">
+    <aside class="side wide">
+      <div><h1 style="font-size:24px;margin-bottom:6px">${tr('出发前，先想好要拍什么')}</h1>
+        <p class="muted" style="margin:0;line-height:1.6">${tr('告诉 AI 你要去哪、和谁、想要什么感觉。它会写一份能用手机照着拍的分镜脚本；回来之后按同一套结构剪，素材和故事更对得上。')}</p></div>
+      <label for="pBrief" class="sr">${tr('这趟旅行')}</label>
+      <textarea id="pBrief" class="field" rows="7" placeholder="${tr('比如：8 月和 James 从多伦多自驾去加拿大东海岸，三个省，想拍得轻松、有海风的感觉，结尾落在灯塔。')}">${esc(s.plan_brief || s.brief || '')}</textarea>
+      <div class="set-grid" style="gap:14px;grid-template-columns:repeat(2,minmax(0,1fr))">
+        <label class="section"><span class="label">${tr('拍几天')}</span>
+          <input id="pDays" class="field mono" type="number" min="1" max="30" value="${esc(s.plan_days || 3)}"></label>
+        <label class="section"><span class="label">${tr('设备')}</span>
+          <input id="pGear" class="field" value="${esc(s.plan_gear || '')}" placeholder="${tr('比如：iPhone + DJI 无人机')}"></label>
+      </div>
+      <div class="section"><div class="label">${tr('成片长度')}</div>
+        <div class="seg" style="grid-template-columns:repeat(4,minmax(0,1fr)) minmax(0,1.4fr)" role="group" aria-label="${tr('成片长度')}">
+          ${lens.map((m) => `<button type="button" data-min="${m}" aria-pressed="${minutes === m}">${tr('{0} 分', m)}</button>`).join('')}
+          <input id="sMinCustom" class="field mono" style="min-height:44px;padding:0 8px;${custom ? 'border-color:var(--accent)' : ''}" type="number" min="0.5" max="120" step="0.5" value="${custom ? esc(minutes) : ''}" placeholder="${tr('自定')}" aria-label="${tr('自定义分钟数')}">
+        </div></div>
+      <button type="button" class="btn" style="min-height:48px;font-size:15px" data-act="make-plan" ${dis()}>${pl ? tr('重新生成拍摄脚本') : tr('生成拍摄脚本')}</button>
+      ${mockOn() ? `<p class="note" style="color:var(--accent)">${tr('现在是离线模拟：脚本是假的，只用来测试流程。')}</p>` : ''}
+      ${pl ? `<p class="note">${tr('重新生成会替换现在的脚本，勾选记录和参考图也会清掉。')}</p>` : ''}
+    </aside>
+    <div class="content">
+      ${!pl ? `<div class="empty"><h2>${tr('拍摄脚本会出现在这里')}</h2>
+          <p style="margin:0;max-width:460px;line-height:1.7">${tr('每一条都写清楚拍什么、怎么构图、拍多久，以及剪辑时为什么需要它。剪不出来的“必拍”镜头会单独标出来。')}</p></div>`
+      : `<div class="toolbar" style="gap:12px;align-items:flex-start">
+          <div style="flex:1 1 260px"><h2 style="font-size:22px">${esc(pl.title || tr('拍摄脚本'))}</h2>
+            <div class="muted" style="margin-top:2px">${esc(pl.logline || '')}</div></div>
+          ${pl.has_html ? `<a class="ghost" href="${media('shootplan.html')}" target="_blank" rel="noopener">${tr('打开手机清单')}</a>
+            <a class="ghost" href="${media('shootplan.html')}" download="shootplan.html">${tr('下载清单')}</a>` : ''}
+        </div>
+        <div class="section" id="planProgress" style="gap:6px">${planProgressHtml()}</div>
+        ${(pl.beats || []).length ? `<div class="toolbar" style="gap:6px">${pl.beats.map((b, i) => `<span class="beatchip" title="${esc(b.intent || '')}"><b>${String(i + 1).padStart(2, '0')}</b>${esc(b.title || '')}</span>`).join('')}</div>` : ''}
+        <div class="seg plandays" role="tablist" style="grid-template-columns:repeat(${Math.min(days.length, 7) || 1},minmax(0,1fr))">
+          ${days.map((d, i) => `<button type="button" role="tab" data-planday="${i}" aria-selected="${i === S.planDay}" aria-pressed="${i === S.planDay}">${tr('第 {0} 天', d.day || i + 1)}<span style="display:block;font-size:11px;color:var(--muted)">${tr('{0} 个镜头', (d.shots || []).length)}</span></button>`).join('')}</div>
+        ${day ? `<section class="section">
+          <div class="dayhead"><h2>${esc(day.where || tr('第 {0} 天', day.day))}</h2></div>
+          ${day.golden_hours ? `<p class="note" style="font-size:13px">${tr('光线最好的时候：')}${esc(day.golden_hours)}</p>` : ''}
+          <ol class="pshots">${(day.shots || []).map((sh, si) => planShotHtml(sh, S.planDay, si)).join('')}</ol>
+          <button type="button" class="ghost" style="align-self:flex-start" data-act="plan-add-shot">${tr('+ 加一个镜头')}</button>
+        </section>` : ''}
+        <div id="planSave">${planSaveHtml()}</div>`}
+    </div>
+    <aside class="detail">
+      ${pl ? `<div><h2 style="font-size:18px">${tr('非拍不可')}</h2>
+          <ul class="plist">${(pl.must_haves || []).map((m) => `<li>${esc(m)}</li>`).join('') || `<li class="muted">–</li>`}</ul></div>
+        <div><h2 style="font-size:18px">${tr('别忘了')}</h2>
+          <ul class="plist">${(pl.reminders || []).map((m) => `<li>${esc(m)}</li>`).join('') || `<li class="muted">–</li>`}</ul></div>` : ''}
+      <div style="margin-top:${pl ? 'auto' : '0'};border-top:1px solid var(--line);padding-top:14px" class="section">
+        <h2 style="font-size:16px">${tr('拍完之后')}</h2>
+        <p class="note" style="font-size:13px">${tr('回到“素材”选择素材文件夹，AI 会逐个镜头看一遍。拍摄脚本的分幕可以直接作为故事线的起点。')}</p>
+        ${pl && (pl.beats || []).length ? `<button type="button" class="ghost" data-act="plan-to-story">${tr('用这个脚本的分幕作为故事线')}</button>` : ''}
+        <a class="ghost" href="#footage">${S.p.footage ? tr('去素材') : tr('选择素材文件夹')}</a>
+      </div>
+    </aside>
+  </div>`;
+}
+function planChanged() {
+  S.planDirty = true;
+  const el = $('#planSave'); if (el) el.innerHTML = planSaveHtml();
+}
+async function savePlan(quiet) {
+  const r = await act(() => api(`${P()}/plan_save`, { days: S.planEdit.days, title: S.planEdit.title, logline: S.planEdit.logline }));
+  if (!r) return false;
+  S.plan = r; planCopy(); render(); if (!quiet) toast(tr('拍摄脚本已保存'));
+  return true;
+}
+/* 参考图：先在浏览器里缩到 1600px 以内、转成 JPG，再传给后端（原图可能有十几 MB） */
+async function shrinkImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = url; });
+    const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.82);
+  } catch (e) {
+    throw new Error(tr('读不了这张图片。iPhone 的 HEIC 照片请先转成 JPG（或者截个图再粘贴）。'));
+  } finally { URL.revokeObjectURL(url); }
+}
+async function addPlanRefs(shotId, files) {
+  files = [...files].filter((f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic)$/i.test(f.name || ''));
+  if (!files.length) { toast(tr('只能添加图片'), true); return; }
+  if (S.planDirty && !(await savePlan(true))) return;        // 新加的镜头要先存进脚本，后端才认得
+  for (const f of files) {
+    const r = await act(async () => api(`${P()}/plan_ref`, { shot_id: shotId, data: await shrinkImage(f) }));
+    if (!r) break;
+    S.plan = r; planCopy();
+  }
+  render();
+}
+function pickPlanRef(shotId) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+  inp.onchange = () => { if (inp.files.length) addPlanRefs(shotId, inp.files); };
+  inp.click();
+}
+async function newPlanProject(name) {
+  let input;
+  const res = await modal(`<h2>${tr('新建项目（还没有素材）')}</h2>
+    <p class="muted" style="margin:0;line-height:1.6">${tr('先写拍摄脚本，回来之后再在“素材”里选择素材文件夹。')}</p>
+    <label class="section"><span class="label">${tr('项目名称')}</span><input class="field" id="npName" autocomplete="off" value="${esc(name || '')}" placeholder="${tr('比如：海洋三省自驾')}"></label>
+    <div class="row-end"><button class="ghost" value="">${tr('取消')}</button><button class="btn" value="ok">${tr('创建')}</button></div>`,
+  (b) => { input = $('#npName', b); setTimeout(() => input.focus(), 30); });
+  if (res !== 'ok' || !input.value.trim()) return;
+  const r = await act(() => api('/api/projects', { name: input.value.trim() }));
+  if (!r) return;
+  await loadProjects();
+  await switchProject(r.id);
+  location.hash = '#plan';
 }
 
 /* ---------------------------------------------------------------- 1 素材 */
@@ -286,6 +482,7 @@ function shotMatches(s) {
   if (f.talk && !s.speech) return false;
   if (f.vert && !s.vertical) return false;
   if (f.hideBlur && s.quality != null && s.quality < badQ()) return false;
+  if (f.prot && !s.protected) return false;
   if (f.q) {
     const hay = [s.summary, s.place, s.activity, s.mood, s.speech, (s.tags || []).join(' '), s.file, s.id].join(' ').toLowerCase();
     if (!f.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
@@ -308,6 +505,7 @@ function progressHtml() {
   const left = p.shots - p.logged;
   let btn;
   if (scanning || analyzing) btn = `<button type="button" class="btn" disabled>${scanning ? tr('扫描中…') : tr('看片中…')}</button>`;
+  else if (!p.clips) btn = '';
   else if (!p.shots || left > 0) btn = `<button type="button" class="btn" data-act="analyze" ${dis()}>${!p.shots ? tr('开始分析') : tr('继续看片（还剩 {0} 个镜头）', left)}</button>`;
   else btn = `<button type="button" class="ghost" data-act="analyze" ${dis()}>${tr('重新分析（只补新加的镜头）')}</button>`;
   return `<div class="label">${tr('处理进度')}</div>
@@ -315,6 +513,9 @@ function progressHtml() {
     ${row(1, '切镜头 · 抽帧 · 打分', p.shots > 0, p.shots ? `${p.shots}${p.unusable ? ` · ${tr('{0} 废片', p.unusable)}` : ''}` : '–')}
     <div class="section" style="gap:8px">${row(3, 'AI 看片', p.shots > 0 && p.logged >= p.shots, p.shots ? `${p.logged} / ${p.shots}` : '–')}
       <div class="bar" style="margin-left:32px"><i style="width:${pct}%"></i></div></div>
+    <label class="section" style="gap:6px"><span class="label">${tr('这部片子的主人公')}</span>
+      <input id="fSubject" class="field" value="${esc((p.settings || {}).subject || '')}" placeholder="${tr('比如：我（长发女生）和男朋友 James')}">
+      <span class="note">${tr('AI 会据此判断哪些镜头有主人公的正脸、两人同框，这些镜头剪片时一定保留。')}${p.logged ? ' ' + tr('改了以后，只对还没看过的镜头生效。') : ''}</span></label>
     <label class="check" style="min-height:32px;font-size:13px"><input type="checkbox" id="fWhisper" ${S.whisper ? 'checked' : ''}>${tr('同时转写人声（需要 faster-whisper）')}</label>
     ${btn}
     ${mockOn() ? `<p class="note" style="color:var(--accent)">${tr('现在是离线模拟：AI 日志是假的，只用来测试流程。')}</p>` : ''}
@@ -326,12 +527,18 @@ function cardHtml(s) {
     <div class="thumb ${s.vertical ? 'contain' : ''}">${s.thumb ? `<img loading="lazy" src="${s.thumb}" alt="">` : ''}
       ${(s.highlight || 0) >= 8 ? `<span class="tag star">${tr('★ 精彩')}</span>` : ''}
       ${s.must ? `<span class="tag must">${tr('必用')}</span>` : s.excluded ? `<span class="tag must" style="color:var(--danger)">${tr('已排除')}</span>` : ''}
+      ${s.protected && !s.must && !s.excluded ? `<span class="tag prot" title="${esc(tr('受保护：{0}', tr(s.protected)))}">${SHIELD}${tr('保护')}</span>` : ''}
       <span class="tag dur">${mmss(s.duration)}</span></div>
     <div class="body"><div class="t">${esc(s.summary || tr('AI 还没看过这个镜头'))}</div>
       <div class="m">${esc([shotType(s.shot_type), s.mood, s.file].filter(Boolean).join(' · '))}</div></div></button>`;
 }
 
 function gridHtml() {
+  if (!S.shots.length && !S.p.footage) {
+    return `<div class="empty"><h2>${tr('还没有素材')}</h2>
+      <p style="margin:0;max-width:440px;line-height:1.7">${tr('拍完之后，在左边选择素材文件夹。出发前可以先去“拍摄脚本”想好要拍什么。')}</p>
+      <a class="ghost" href="#plan">${tr('去写拍摄脚本')}</a></div>`;
+  }
   if (!S.shots.length) {
     return `<div class="empty"><h2>${S.p.clips ? tr('找到 {0} 条素材', S.p.clips) : tr('还没有镜头')}</h2>
       <p style="margin:0;max-width:440px;line-height:1.7">${tr('点左边的“开始分析”：切镜头、抽关键帧、打质量分，然后 AI 逐个镜头写日志——内容、情绪、景别和最佳片段。')}</p></div>`;
@@ -372,11 +579,25 @@ function detailHtml() {
       <dt>GPS</dt><dd>${gps}</dd>
       <dt>${tr('对白')}</dt><dd>${esc(s.speech || tr('无'))}</dd>
       <dt>${tr('标签')}</dt><dd>${esc((s.tags || []).join(tr('、')) || '–')}</dd>
+      <dt>${tr('保护')}</dt><dd>${protectText(s)}</dd>
+      <dt>${tr('AI 判断')}</dt><dd>${signalsHtml(s)}</dd>
     </dl>
     <div class="toolbar" style="margin-top:auto">
       <button type="button" class="ghost ${s.must ? 'outline' : ''}" style="flex:1" data-flag="must" aria-pressed="${s.must}">${s.must ? tr('✓ 必用') : tr('标为必用')}</button>
       <button type="button" class="ghost ${s.excluded ? 'danger' : ''}" style="flex:1" data-flag="exclude" aria-pressed="${s.excluded}">${s.excluded ? tr('已排除（点击恢复）') : tr('排除这个镜头')}</button>
-    </div>`;
+    </div>
+    ${(s.protected && !s.must) || s.unprotected ? `<button type="button" class="ghost sm" data-flag="unprotect" aria-pressed="${!!s.unprotected}">${s.unprotected ? tr('恢复自动保护') : tr('不保护这个镜头')}</button>` : ''}`;
+}
+function protectText(s) {
+  if (s.excluded) return esc(tr('已排除，AI 不会用'));
+  if (s.protected) return `<span class="prot-text">${SHIELD} ${esc(tr(s.protected))}</span><div class="note">${tr('剪片时一定保留；AI 漏掉会自动补回。')}</div>`;
+  if (s.unprotected) return esc(tr('已关闭自动保护'));
+  return esc(tr('不会被自动保护'));
+}
+function signalsHtml(s) {
+  if (s.faces_clear == null && s.subject_present == null && s.people_together == null && s.scenery_value == null) return '–';
+  const on = (v, label) => `<span class="sig ${v ? 'on' : ''}">${v ? '✓' : '·'} ${esc(tr(label))}</span>`;
+  return `${on(s.faces_clear, '清晰正脸')}${on(s.subject_present, '主人公在场')}${on(s.people_together, '多人同框')}<span class="sig ${(s.scenery_value || 0) >= 8 ? 'on' : ''}">${esc(tr('风景 {0}/10', s.scenery_value ?? '–'))}</span>`;
 }
 
 function dayNavHtml() {
@@ -392,7 +613,7 @@ function viewFootage() {
       <section class="section">
         <div class="label">${tr('素材文件夹')}</div>
         <div class="path">${esc(p.footage || '–')}</div>
-        <button type="button" class="ghost" data-act="rescan" ${dis()}>${tr('更换文件夹 / 重新扫描')}</button>
+        <button type="button" class="${p.footage ? 'ghost' : 'btn'}" data-act="rescan" ${dis()}>${p.footage ? tr('更换文件夹 / 重新扫描') : tr('选择素材文件夹')}</button>
         <div class="stats" style="margin-top:4px"><div><b>${p.clips}</b><span>${tr('文件')}</span></div><div><b>${p.shots}</b><span>${tr('镜头')}</span></div><div><b>${mmss(p.duration_min * 60)}</b><span>${tr('总时长')}</span></div></div>
       </section>
       <section class="section" id="fProgress">${progressHtml()}</section>
@@ -402,7 +623,7 @@ function viewFootage() {
       ${S.shots.length ? `<div class="toolbar">
         <label for="fSearch" class="sr">${tr('搜索镜头日志')}</label>
         <input id="fSearch" class="field" type="search" placeholder="${tr('搜索镜头日志：灯塔、退潮、车里聊天…')}" value="${esc(f.q)}">
-        ${chip('star', '★ 精彩')}${chip('talk', '有对白')}${chip('vert', '竖屏')}${chip('hideBlur', '隐藏废片')}</div>` : ''}
+        ${chip('star', '★ 精彩')}${chip('prot', '受保护')}${chip('talk', '有对白')}${chip('vert', '竖屏')}${chip('hideBlur', '隐藏废片')}</div>` : ''}
       <div id="fGrid" class="section" style="gap:22px">${gridHtml()}</div>
     </div>
     ${S.shots.length ? `<aside class="detail" id="fDetail">${detailHtml()}</aside>` : ''}
@@ -458,6 +679,15 @@ function beatHtml(b, i) {
   </li>`;
 }
 
+function protectSummaryHtml() {
+  const prot = S.shots.filter((x) => x.protected && !x.excluded);
+  if (!prot.length) return '';
+  const by = {};
+  prot.forEach((x) => { by[x.protected] = (by[x.protected] || 0) + 1; });
+  return `<div class="gap prot-box"><b>${SHIELD} ${tr('关键画面保护：{0} 个镜头', prot.length)}</b>
+    ${Object.entries(by).map(([r, n]) => `${esc(tr(r))} ${n}`).join(tr('、'))}
+    <div class="note" style="margin-top:6px">${tr('AI 编故事时会被要求保留这些镜头，漏掉的会自动补回。')} <a href="#footage" data-act="show-protected">${tr('查看')}</a></div></div>`;
+}
 function viewStory() {
   const s = S.p.settings || {};
   const minutes = +(s.minutes || 3);
@@ -496,13 +726,15 @@ function viewStory() {
           <button type="button" class="ghost" data-act="add-beat">${tr('+ 加一幕')}</button>
           <button type="button" class="btn" data-act="make-story" ${!ol.beats.length || jobRunning() ? 'disabled' : ''}>${tr('按这个结构剪 →')}</button></div>
         <ol class="beats" id="beats">${ol.beats.map(beatHtml).join('')}</ol>`
-      : `<div class="empty"><h2>${tr('故事线会出现在这里')}</h2><p style="margin:0;max-width:440px;line-height:1.7">${tr('在左边写下你想要的故事，AI 会对照你真实拍到的素材，给出一组可以编辑、排序、删除的分幕。')}</p></div>`}
+      : `<div class="empty"><h2>${tr('故事线会出现在这里')}</h2>
+          ${S.plan && (S.plan.beats || []).length ? `<button type="button" class="ghost outline" data-act="plan-to-story">${tr('用拍摄脚本的分幕作为故事线')}</button>` : ''}<p style="margin:0;max-width:440px;line-height:1.7">${tr('在左边写下你想要的故事，AI 会对照你真实拍到的素材，给出一组可以编辑、排序、删除的分幕。')}</p></div>`}
     </div>
     <aside class="detail">
       <div><h2 style="font-size:18px">${tr('素材撑不起的部分')}</h2>
         <p class="muted" style="margin:6px 0 0;line-height:1.6">${tr('AI 对照了你写的内容和实际拍到的东西，这些地方需要你决定。')}</p></div>
       ${missing.length ? missing.map((m) => `<div class="gap">${esc(m)}</div>`).join('') : `<p class="muted" style="margin:0">${ol ? tr('没有发现明显的缺口。') : tr('生成故事线后显示。')}</p>`}
       ${ol && ol.notes ? `<div class="gap" style="background:var(--card);border-color:var(--line)"><b style="color:var(--text)">${tr('剪辑建议')}</b>${esc(ol.notes)}</div>` : ''}
+      ${protectSummaryHtml()}
       ${S.p.flags && (S.p.flags.must || S.p.flags.exclude) ? `<p class="note">${tr('已标记：{0} 个必用镜头，{1} 个排除镜头（排除的 AI 不会用）。', S.p.flags.must, S.p.flags.exclude)}</p>` : ''}
       <p class="note" style="margin-top:auto;border-top:1px solid var(--line);padding-top:14px;font-size:13px">${tr('提示：录一段 5 分钟的语音回忆放进素材文件夹，开启转写后，AI 能找到更清楚的结构。')}</p>
     </aside>
@@ -587,8 +819,9 @@ function renderTracks() {
     <div class="lane">${ch.map((c) => `<div class="chapgroup" style="flex:${chDur(c)} 1 0">${c.items.map((i) => {
       const t = S.tl[i], s = S.byId[t.shot_id] || {};
       const bg = s.thumb ? `background-image:url('${s.thumb}')` : '';
-      return `<button type="button" class="clip ${i === S.tsel ? 'sel' : ''}" draggable="true" data-clip="${i}" style="flex:${dur(i)} 1 0;${bg}"
-        aria-label="${esc((s.summary || t.shot_id) + ' ' + tr('{0} 秒', dur(i).toFixed(1)))}">${t.text ? `<span class="cap">${esc(t.text)}</span>` : ''}</button>`;
+      const prot = s.protected && !s.excluded;
+      return `<button type="button" class="clip ${i === S.tsel ? 'sel' : ''} ${t.role === 'protected' ? 'auto-prot' : ''}" draggable="true" data-clip="${i}" style="flex:${dur(i)} 1 0;${bg}"
+        aria-label="${esc((s.summary || t.shot_id) + ' ' + tr('{0} 秒', dur(i).toFixed(1)) + (prot ? ' · ' + tr('受保护：{0}', tr(s.protected)) : ''))}">${prot ? `<span class="shield" title="${esc(tr('受保护：{0}', tr(s.protected)))}">${SHIELD}</span>` : ''}${t.text ? `<span class="cap">${esc(t.text)}</span>` : ''}</button>`;
     }).join('')}</div>`).join('')}</div>
     <div class="lab">A1</div>
     <div class="lane">${ch.map((c) => `<div class="chapgroup" style="flex:${chDur(c)} 1 0">${c.items.map((i) => `<span class="aud ${S.tl[i].keep_audio ? 'on' : ''}" style="flex:${dur(i)} 1 0" title="${S.tl[i].keep_audio ? tr('保留原声') : tr('原声静音')}"></span>`).join('')}</div>`).join('')}</div>
@@ -603,7 +836,8 @@ function renderEditor() {
   const s = S.byId[t.shot_id] || { duration: t.out, has_audio: false };
   el.innerHTML = `<div class="who"><div class="mono muted" style="font-size:12px">#${S.tsel + 1} · ${esc(t.shot_id)} · ${esc(t.role || '')} · ${tr('镜头全长 {0} 秒', (+s.duration).toFixed(1))}</div>
       <div style="font:600 16px var(--serif);margin-top:4px">${esc(s.summary || t.shot_id)}</div>
-      ${t.why ? `<div class="muted" style="font-size:13px;margin-top:4px">${tr('剪辑理由：')}${esc(t.why)}</div>` : ''}</div>
+      ${t.why && t.role !== 'protected' ? `<div class="muted" style="font-size:13px;margin-top:4px">${tr('剪辑理由：')}${esc(t.why)}</div>` : ''}
+      ${s.protected && !s.excluded ? `<div class="prot-text" style="font-size:13px;margin-top:4px">${SHIELD} ${esc(tr('受保护：{0}', tr(s.protected)))}${t.role === 'protected' ? ' · ' + esc(tr('AI 漏掉了，已自动补回')) : ''}</div>` : ''}</div>
     <label class="f num">${tr('入点（秒）')}<input id="eIn" type="number" step="0.1" min="0" max="${s.duration}" value="${t.in}"></label>
     <label class="f num">${tr('出点（秒）')}<input id="eOut" type="number" step="0.1" min="0" max="${s.duration}" value="${t.out}"></label>
     <label class="f grow">${tr('字幕')}<input id="eText" value="${esc(t.text)}" placeholder="${tr('可留空')}"></label>
@@ -868,6 +1102,9 @@ function viewSettings() {
       <div class="set-row"><label class="lbl" for="cfgBase">${tr('API 地址')} <span class="help" style="font-weight:400">${tr('（一般不用改）')}</span></label>
         <input id="cfgBase" class="field mono" style="font-size:13px" data-cfg="base_url" value="${esc(d.base_url)}" placeholder="https://api.anthropic.com">
         <div class="help">${tr('只有通过公司代理或网关访问时才需要填。填错会导致 401 或连不上。')}</div></div>
+      <div class="set-row"><label class="lbl" for="cfgOrigins">${tr('允许访问的网页')} <span class="help" style="font-weight:400">${tr('（一般不用改）')}</span></label>
+        <input id="cfgOrigins" class="field mono" style="font-size:13px" data-cfg="allowed_origins" value="${esc(d.allowed_origins || '')}" placeholder="https://my-app.vercel.app">
+        <div class="help">${tr('只有本机网页和 Lovable 可以调用这个后端。别的前端（比如自己部署的网站）要在这里填它的地址，多个用逗号隔开。不要填 *。')}</div></div>
     </section>
     </main>
   </div>
@@ -993,6 +1230,7 @@ setInterval(() => { if (!document.hidden && S.page !== 'logs') refreshLogSummary
 async function newProject() {
   const r = await browse('new', S.p ? S.p.footage : '');
   if (!r) return;
+  if (r.planOnly) return newPlanProject(r.name);
   await startJob('/api/projects', { footage: r.path, name: r.name }, () => {
     location.hash = '#footage';
     startJob(`${P()}/analyze`, { mock: mockOn(), whisper: S.whisper });
@@ -1016,14 +1254,16 @@ document.addEventListener('click', async (e) => {
   if (d.day) { S.day = d.day; $('#fGrid').innerHTML = gridHtml(); $('#fDays').innerHTML = dayNavHtml(); return; }
   if (d.filter) { S.filters[d.filter] = !S.filters[d.filter]; t.setAttribute('aria-pressed', S.filters[d.filter]); $('#fGrid').innerHTML = gridHtml(); return; }
   if (d.flag) {
-    const s = S.byId[S.fsel]; const on = d.flag === 'must' ? !s.must : !s.excluded;
+    const s = S.byId[S.fsel]; const on = d.flag === 'must' ? !s.must : d.flag === 'exclude' ? !s.excluded : !s.unprotected;
     const r = await act(() => api(`${P()}/flag`, { shot: s.id, flag: d.flag, on }));
     if (r) {
-      for (const x of S.shots) { x.must = r.flags.must.includes(x.id); x.excluded = r.flags.exclude.includes(x.id); }
+      const sh = await api(`${P()}/shots`).catch(() => null);
+      if (sh) { S.shots = sh.shots; S.byId = Object.fromEntries(S.shots.map((x) => [x.id, x])); }
+      else for (const x of S.shots) { x.must = r.flags.must.includes(x.id); x.excluded = r.flags.exclude.includes(x.id); }
       S.p.flags = { must: r.flags.must.length, exclude: r.flags.exclude.length };
       $('#fDetail').innerHTML = detailHtml();
       const card = document.querySelector(`.card[data-shot="${CSS.escape(s.id)}"]`);
-      if (card) card.outerHTML = cardHtml(s);
+      if (card) card.outerHTML = cardHtml(S.byId[s.id] || s);
     }
     return;
   }
@@ -1044,6 +1284,22 @@ document.addEventListener('click', async (e) => {
   if (d.scroll) { const el = document.getElementById('sec-' + d.scroll); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   if (d.set) { setDraft(d.set, d.val); return render(); }
   if (d.toggle) { setDraft(d.toggle, !S.draft[d.toggle]); return render(); }
+  if (d.planday != null) { S.planDay = +d.planday; return render(); }
+  if (d.prefadd != null) { const li = t.closest('[data-pday]'); return pickPlanRef(S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx].shot_id); }
+  if (d.prefdel != null) {
+    const li = t.closest('[data-pday]'); const sh = S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx];
+    if (!(await confirmBox(tr('删除这张参考图？'), tr('图片文件也会一起删掉。'), tr('删除')))) return;
+    if (S.planDirty && !(await savePlan(true))) return;
+    const r = await act(() => api(`${P()}/plan_ref_del`, { shot_id: sh.shot_id, name: d.prefdel }));
+    if (r) { S.plan = r; planCopy(); render(); }
+    return;
+  }
+  if (d.pmust != null || d.pdel != null) {
+    const li = t.closest('[data-pday]'); const di = +li.dataset.pday, si = +li.dataset.pidx;
+    const shots = S.planEdit.days[di].shots;
+    if (d.pdel != null) shots.splice(si, 1); else shots[si].must_have = !shots[si].must_have;
+    planChanged(); return render();
+  }
   if (d.bmove || d.bdel != null) {
     const i = +t.closest('[data-beat]').dataset.beat;
     if (d.bmove) { const j = i + +d.bmove; [S.outline.beats[i], S.outline.beats[j]] = [S.outline.beats[j], S.outline.beats[i]]; }
@@ -1053,6 +1309,35 @@ document.addEventListener('click', async (e) => {
 
   switch (d.act) {
     case 'new-project': return newProject();
+    case 'new-plan-project': return newPlanProject('');
+    case 'make-plan': {
+      const brief = $('#pBrief').value.trim();
+      if (!brief) { toast(tr('先写一下这趟旅行：去哪、和谁、想要什么感觉'), true); return; }
+      if (S.plan && !(await confirmBox(tr('重新生成拍摄脚本？'), tr('现在的脚本、勾选记录和参考图都会被替换。'), tr('重新生成')))) return;
+      S.planDirty = false;
+      return startJob(`${P()}/plan`, { brief, days: +$('#pDays').value || 3, gear: $('#pGear').value.trim(), minutes: +(S.p.settings.minutes || 3), mock: mockOn() });
+    }
+    case 'plan-add-shot': {
+      const day = S.planEdit.days[S.planDay];
+      day.shots = day.shots || [];
+      day.shots.push({ shot_id: `d${day.day || S.planDay + 1}x${String(Date.now()).slice(-5)}`, beat: '', what: '', framing: 'medium', hold: '5-8s', why: '', must_have: false });
+      planChanged(); render();
+      { const tas = document.querySelectorAll('.pshot textarea'); const last = tas[tas.length - 1]; if (last) last.focus(); }
+      return;
+    }
+    case 'plan-save': return savePlan();
+    case 'plan-discard': planCopy(); return render();
+    case 'plan-to-story': {
+      if (S.outline && S.outline.beats && S.outline.beats.length && !(await confirmBox(tr('用拍摄脚本替换现在的故事线？'), tr('现在的分幕会被替换（还没按“按这个结构剪”的修改也会丢掉）。'), tr('替换')))) return;
+      const beats = (S.plan.beats || []).map((b, i, arr) => ({ id: b.id || 'b' + (i + 1), title: b.title || '', intent: b.intent || '',
+        evidence: tr('来自拍摄脚本'), seconds: Math.max(5, Math.round((+(S.p.settings.minutes || 3) * 60) / arr.length)), shot_ids: [] }));
+      S.outline = { title: S.plan.title || '', logline: S.plan.logline || '', beats, missing: [], notes: '' };
+      outlineChanged();
+      if (location.hash === '#story') render(); else location.hash = '#story';
+      toast(tr('已把拍摄脚本的分幕放进故事线，修改后按“按这个结构剪”'));
+      return;
+    }
+    case 'show-protected': S.filters.prot = true; return;
     case 'toggle-key': S.showKey = !S.showKey; return render();
     case 'test-key': {
       S.keyTest = 'testing'; render();
@@ -1079,7 +1364,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'analyze':
       if (!mockOn() && !(await confirmBox(tr('开始 AI 看片？'), tr('AI 会逐个镜头看一遍，按镜头数计费；已经看过的镜头不会重复计费。'), tr('开始')))) return;
-      return startJob(`${P()}/analyze`, { mock: mockOn(), whisper: S.whisper });
+      return startJob(`${P()}/analyze`, { mock: mockOn(), whisper: S.whisper, subject: (($('#fSubject') || {}).value || '').trim() });
     case 'pick-music': {
       const r = await browse('audio', (S.p.settings || {}).music || '');
       if (r && r.path) { await act(() => saveSettings({ music: r.path })); render(); }
@@ -1108,9 +1393,13 @@ document.addEventListener('click', async (e) => {
     case 'export-xml': return startJob(`${P()}/export`, {});
     case 'recheck': return startJob(`${P()}/recheck`, {});
     case 'open-folder': await act(() => api(`${P()}/open_folder`, {})); return;
-    case 'del-clip':
+    case 'del-clip': {
+      const sh = S.byId[S.tl[S.tsel].shot_id];
+      if (sh && sh.protected && !sh.excluded && !(await confirmBox(tr('删除受保护的镜头？'),
+        tr('这个镜头受保护（{0}）。手动删除没问题，但下次让 AI 修改时它会被补回来。想彻底不用，请在“素材”里点“不保护这个镜头”。', tr(sh.protected)), tr('删除')))) return;
       S.tl.splice(S.tsel, 1); S.tsel = clamp(S.tsel, 0, S.tl.length - 1);
       return tlChanged(true);
+    }
     case 'discard': resetTimeline(); renderTracks(); renderEditor(); renderSavebar(); return;
     case 'save-tl': return saveTimeline(false);
     case 'save-render': return saveTimeline(true);
@@ -1122,6 +1411,16 @@ document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.id === 'fSearch') { S.filters.q = t.value; $('#fGrid').innerHTML = gridHtml(); return; }
   if (t.id === 'logSearch') { S.logQ = t.value; clearTimeout(S.logT); S.logT = setTimeout(refreshLogs, 300); return; }
+  if (t.dataset.pf) {
+    const li = t.closest('[data-pday]');
+    const sh = S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx];
+    sh[t.dataset.pf] = t.value;
+    if (t.dataset.pf === 'framing') {             // 换了景别，原来的草图就不对了：保存时按新景别重画
+      sh.sketch = null; sh.sketch_svg = ''; sh.how = '';
+      const box = li.querySelector('.psketch'); if (box) box.innerHTML = `<span class="note">${tr('保存后更新草图')}</span>`;
+    }
+    return planChanged();
+  }
   if (t.id === 'cfgKey') { S.newKey = t.value.trim(); S.keyTest = null; settingsLive(); return; }
   if (t.dataset.cfg && t.type !== 'checkbox') { setDraft(t.dataset.cfg, t.value); settingsLive(); return; }
   if (t.dataset.bf) {
@@ -1147,6 +1446,20 @@ document.addEventListener('change', async (e) => {
   if (t.id === 'uiLang') return setUiLang(t.value);
   if (t.dataset.cfg && t.type === 'checkbox') { setDraft(t.dataset.cfg, t.checked); settingsLive(); return; }
   if (t.id === 'fWhisper') { S.whisper = t.checked; return; }
+  if (t.id === 'fSubject') { await act(() => saveSettings({ subject: t.value })); return; }
+  if (t.id === 'pBrief' || t.id === 'pGear' || t.id === 'pDays') {
+    const key = { pBrief: 'plan_brief', pGear: 'plan_gear', pDays: 'plan_days' }[t.id];
+    await act(() => saveSettings({ [key]: t.value })); return;
+  }
+  if (t.dataset.pcheck) {
+    const r = await act(() => api(`${P()}/plan_check`, { shot_id: t.dataset.pcheck, done: t.checked }));
+    if (r) {
+      S.plan.done = r.done; S.planEdit.done = r.done;
+      t.closest('.pshot').classList.toggle('done', t.checked);
+      const pg = $('#planProgress'); if (pg) pg.innerHTML = planProgressHtml();
+    } else t.checked = !t.checked;
+    return;
+  }
   if (t.id === 'logAuto') { S.logAuto = t.checked; return; }
   if (t.id === 'sBrief') { await act(() => saveSettings({ brief: t.value })); return; }
   if (t.id === 'sMinCustom' && t.value) { await act(() => saveSettings({ minutes: +t.value })); return render(); }
@@ -1182,6 +1495,32 @@ document.addEventListener('submit', async (e) => {
 
 /* 拖动排序：分幕和时间线镜头 */
 let drag = null;
+let planTarget = null;                    // 最近点过 / 指过的镜头，粘贴图片就加到它上面
+document.addEventListener('pointerdown', (e) => { const li = e.target.closest && e.target.closest('.pshot'); if (li) planTarget = li; });
+document.addEventListener('paste', (e) => {
+  if (S.page !== 'plan' || !S.planEdit) return;
+  const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter((f) => f.type.startsWith('image/'));
+  if (!files.length) return;
+  e.preventDefault();
+  const li = (document.activeElement && document.activeElement.closest('.pshot')) || (planTarget && planTarget.isConnected ? planTarget : null);
+  if (!li) { toast(tr('先点一下要加图的镜头，再粘贴'), true); return; }
+  addPlanRefs(S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx].shot_id, files);
+});
+document.addEventListener('dragover', (e) => {
+  if (drag || S.page !== 'plan' || !e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+  const li = e.target.closest('.pshot');
+  document.querySelectorAll('.pshot.drop').forEach((x) => x !== li && x.classList.remove('drop'));
+  if (li) { e.preventDefault(); li.classList.add('drop'); }
+});
+document.addEventListener('dragleave', (e) => { if (e.target.classList && e.target.classList.contains('pshot') && !e.target.contains(e.relatedTarget)) e.target.classList.remove('drop'); });
+document.addEventListener('drop', (e) => {
+  if (drag || S.page !== 'plan' || !e.dataTransfer || !e.dataTransfer.files.length) return;
+  const li = e.target.closest('.pshot');
+  document.querySelectorAll('.pshot.drop').forEach((x) => x.classList.remove('drop'));
+  if (!li) return;
+  e.preventDefault();
+  addPlanRefs(S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx].shot_id, e.dataTransfer.files);
+});
 document.addEventListener('dragstart', (e) => {
   const b = e.target.closest && e.target.closest('[data-beat], [data-clip]');
   if (!b) return;
@@ -1233,12 +1572,21 @@ window.addEventListener('beforeunload', (e) => { if (S.tlDirty) { e.preventDefau
     const want = store('project');
     S.pid = S.projects.some((p) => p.id === want) ? want : (S.projects[0] || {}).id || null;
     await loadProject();
-    if (!location.hash && S.p) location.hash = S.p.has_story ? '#timeline' : S.p.has_outline ? '#story' : '#footage';
+    if (!location.hash && S.p) location.hash = S.p.has_story ? '#timeline' : S.p.has_outline ? '#story' : (S.p.logged || S.p.footage) ? '#footage' : '#plan';
     render();
-    const j = await api('/api/job');
-    if (j.status === 'running') { S.job = j; S.jobSince = 0; pollJob(); }
+    const j = await getJob().catch(() => null);
+    if (j && j.status === 'running') { S.job = j; S.jobSince = 0; pollJob(); }
+    else if (j && j.status === 'error' && store('seenJobError') !== j.started) {
+      // 刷新页面前任务失败了、还没看到原因：显示一次
+      S.job = j; S.jobLines = (j.lines || []).slice(-400); S.jobSince = j.line_count || 0; renderJob();
+    }
   } catch (e) {
-    $('#app').innerHTML = `<div class="page"><div class="content"><div class="empty"><h2>${tr('连不上 vlogai 后端')}</h2>
-      <p style="margin:0">${tr('先在终端运行 {0}，再刷新这个页面。', '<span class="mono">python -m vlogai.studio</span>')}</p><p class="err">${esc(e.message)}</p></div></div></div>`;
+    $('#app').innerHTML = e.offline
+      ? `<div class="page"><div class="content"><div class="empty"><h2>${tr('连不上 vlogai 后端')}</h2>
+      <p style="margin:0">${tr('先在终端运行 {0}，再刷新这个页面。', '<span class="mono">python -m vlogai.studio</span>')}</p><p class="err">${esc(e.message)}</p></div></div></div>`
+      : `<div class="page"><div class="content"><div class="empty"><h2>${tr('页面加载出错')}</h2>
+      <p style="margin:0">${tr('后端在运行，但读取数据时出错了。刷新试试；还不行就看看运行 studio 的终端里的报错。')}</p><p class="err">${esc(e.message)}</p>
+      <div class="toolbar" style="justify-content:center"><button type="button" class="btn" onclick="location.reload()">${tr('刷新')}</button></div></div></div></div>`;
+    console.error(e);
   }
 })();

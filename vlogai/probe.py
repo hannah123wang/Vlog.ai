@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .common import VIDEO_EXTS, Project, log, run, write_json
+from .common import VIDEO_EXTS, Project, log, read_json, run, write_json
 
 
 def _parse_time(s: str | None) -> datetime | None:
@@ -115,8 +115,17 @@ def scan(footage_dir: Path, project: Project) -> list[dict]:
     # group by calendar day (local-ish: uses the stored offset) -> Day 1, Day 2 ...
     days = sorted({c["created"][:10] for c in clips})
     day_index = {d: i + 1 for i, d in enumerate(days)}
-    for i, c in enumerate(clips, 1):
-        c["id"] = f"c{i:04d}"
+    # 同一个文件重新扫描时沿用原来的 id：镜头、日志、时间线都靠 id 关联。
+    # 以前按时间顺序重新编号，新加一条更早的素材，后面所有 id 都会错位。
+    old_ids = {c["path"]: c["id"] for c in (read_json(project.clips_json, []) or []) if "id" in c}
+    used = set(old_ids.values())
+    next_n = max([int(i[1:]) for i in used if i[1:].isdigit()] + [0]) + 1
+    for c in clips:
+        if c["path"] in old_ids:
+            c["id"] = old_ids[c["path"]]
+        else:
+            c["id"] = f"c{next_n:04d}"
+            next_n += 1
         c["day"] = day_index[c["created"][:10]]
 
     write_json(project.clips_json, clips)

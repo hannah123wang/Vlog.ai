@@ -34,7 +34,8 @@ Build a desktop-first web app called "vlogai studio" — an AI assistant editor 
 CONTEXT
 The app is a front-end only. All video processing happens in a local Python backend the user
 runs on their own machine at http://127.0.0.1:8900 (configurable in a settings field, stored in
-localStorage, default http://127.0.0.1:8900). The backend has CORS enabled. Never try to process
+localStorage, default http://127.0.0.1:8900). The backend allows requests from Lovable domains and
+localhost only, and every POST must send the header Content-Type: application/json. Never try to process
 video in the browser. If the backend is unreachable, show a calm "本地引擎没有连上" state with the
 command to start it, and offer a DEMO MODE that loads bundled sample JSON instead.
 

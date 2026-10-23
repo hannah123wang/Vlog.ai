@@ -12,13 +12,16 @@ import string
 import subprocess
 import sys
 import urllib.parse
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__, applog, config
 from ..applog import log
 from .. import describe as describe_mod
-from .. import export_xml, frames, outline, probe, render, shootplan, story, storyboard, transcribe
+from .. import export_xml, frames, outline, probe, render, shootplan, sketch, story, storyboard, transcribe
+import base64
+import time
 from ..protect import protected
 from ..common import VIDEO_EXTS, Project, read_json, require_ffmpeg, write_json
 from ..llm import get_llm, key_hint, test_key
@@ -31,17 +34,23 @@ runner = JobRunner()
 
 
 # ---------------------------------------------------------------- helpers
+def safe_name(name: str) -> str:
+    """项目名只留字母数字（含中文）、空格、- _ .，且不能以点开头（挡住 .. 和 .env 这类）。"""
+    safe = re.sub(r"[^\w\-. ]", "", name or "").strip().lstrip(".").strip()
+    return safe
+
+
 def project_dir(pid: str) -> Project:
-    safe = re.sub(r"[^\w\-. ]", "", pid).strip()
-    if not safe:
+    safe = safe_name(pid)
+    if not safe or (PROJECTS / safe).resolve().parent != PROJECTS:
         raise ValueError("项目名无效")
     return Project(PROJECTS / safe)
 
 
 def flags(p: Project) -> dict:
-    """界面里标记的“必用 / 排除”镜头。排除的镜头在 describe.load_logged_shots 里被过滤掉。"""
+    """界面里对镜头的标记：must 必用（一定保护）、exclude 排除（AI 看不到）、unprotect 不要自动保护。"""
     f = read_json(p.root / "flags.json", {}) or {}
-    return {"must": list(f.get("must", [])), "exclude": list(f.get("exclude", []))}
+    return {k: list(f.get(k, [])) for k in ("must", "exclude", "unprotect")}
 
 
 def media_url(pid: str, p: Project, path: str) -> str:
@@ -103,7 +112,7 @@ def list_projects() -> list[dict]:
         return []
     out = []
     for d in sorted(PROJECTS.iterdir(), key=lambda x: -x.stat().st_mtime):
-        if d.is_dir() and (d / "clips.json").exists():
+        if d.is_dir() and any((d / f).exists() for f in ("clips.json", "settings.json", "shootplan.json")):
             try:
                 out.append(project_summary(d.name))
             except Exception:  # noqa: BLE001
@@ -117,8 +126,12 @@ def browse(path: str) -> dict:
     base = base.resolve()
     if not base.is_dir():
         base = Path.home()
+    try:
+        entries = sorted(base.iterdir())
+    except PermissionError as e:
+        raise ValueError(f"没有权限打开：{base}") from e
     dirs = []
-    for d in sorted(base.iterdir()):
+    for d in entries:
         try:
             if d.is_dir() and not d.name.startswith("."):
                 n = sum(1 for f in d.iterdir()
@@ -126,7 +139,7 @@ def browse(path: str) -> dict:
                 dirs.append({"name": d.name, "path": str(d), "videos": n})
         except PermissionError:
             continue
-    here = sum(1 for f in base.iterdir()
+    here = sum(1 for f in entries
                if f.suffix.lower() in VIDEO_EXTS and not f.name.startswith("."))
     return {"path": str(base), "parent": str(base.parent) if base.parent != base else None,
             "dirs": dirs[:400], "videos_here": here}
@@ -138,11 +151,14 @@ def shots_payload(pid: str) -> list[dict]:
     fl = flags(p)
     must, exc = set(fl["must"]), set(fl["exclude"])
     shots_all = read_json(p.shots_json, []) or []
-    prot = protected(p, [{**s, "log": read_json(p.logs_dir / f"{s['id']}.json", {}) or {}}
-                         for s in shots_all]) if shots_all else {}
+    logs = {s["id"]: read_json(p.logs_dir / f"{s['id']}.json", {}) or {} for s in shots_all}
+    target = float(p.settings().get("minutes") or 3) * 60
+    # 和剪辑时用同样的规则和上限；quiet：网页轮询时不要往日志里刷屏
+    prot = protected(p, [{**s, "log": logs[s["id"]]} for s in shots_all if logs[s["id"]]],
+                     target, quiet=True) if shots_all else {}
     out = []
-    for s in read_json(p.shots_json, []) or []:
-        lg = read_json(p.logs_dir / f"{s['id']}.json", {}) or {}
+    for s in shots_all:
+        lg = logs[s["id"]]
         thumb = ""
         if s.get("frames"):
             f = s["frames"][len(s["frames"]) // 2]["path"]
@@ -161,8 +177,118 @@ def shots_payload(pid: str) -> list[dict]:
                     "tags": lg.get("tags", []), "activity": lg.get("activity", ""),
                     "best_moment": lg.get("best_moment"), "logged": bool(lg),
                     "must": s["id"] in must, "excluded": s["id"] in exc,
-                    "protected": prot.get(s["id"], "")})
+                    "unprotected": s["id"] in fl["unprotect"],
+                    "protected": prot.get(s["id"], ""),
+                    "faces_clear": lg.get("faces_clear"), "subject_present": lg.get("subject_present"),
+                    "people_together": lg.get("people_together"), "scenery_value": lg.get("scenery_value")})
     return out
+
+
+def plan_payload(p: Project) -> dict:
+    plan = read_json(p.out("shootplan.json"), {}) or {}
+    if plan:
+        prog = read_json(p.out("shootplan_progress.json"), {}) or {}
+        plan["done"] = list(prog.get("done", []))
+        plan["has_html"] = p.out("shootplan.html").exists()
+        vertical = bool(p.settings().get("vertical"))
+        plan["vertical"] = vertical
+        pid = p.root.name
+        for d in plan.get("days", []):
+            for sh in d.get("shots", []):
+                sh["sketch"] = sketch.normalize(sh.get("sketch"), sh.get("framing", ""))
+                sh["sketch_svg"] = sketch.sketch_svg(sh["sketch"], sh.get("framing", ""), vertical, sh.get("what", ""))
+                sh["how"] = sketch.describe(sh["sketch"], sh.get("framing", ""))
+                sh["refs"] = [r for r in sh.get("refs", []) or [] if (p.out(shootplan.REFS_DIR) / r).is_file()]
+                sh["ref_urls"] = [f"/media/{urllib.parse.quote(pid)}/{shootplan.REFS_DIR}/{urllib.parse.quote(r)}"
+                                  for r in sh["refs"]]
+    return plan
+
+
+REF_MAX_BYTES = 4 * 1024 * 1024       # 网页会先把图压到 1600px 左右，正常只有几百 KB
+REF_PER_SHOT = 3
+
+
+def _find_shot(plan: dict, shot_id: str) -> dict:
+    for d in plan.get("days", []):
+        for sh in d.get("shots", []):
+            if sh.get("shot_id") == shot_id:
+                return sh
+    raise ValueError("拍摄脚本里没有这个镜头，先保存一下脚本再加参考图")
+
+
+def add_plan_ref(p: Project, body: dict) -> dict:
+    """给拍摄脚本的某个镜头附一张参考图（网页传来 data:image/...;base64,...）。"""
+    plan = read_json(p.out("shootplan.json"), {}) or {}
+    if not plan:
+        raise ValueError("还没有拍摄脚本")
+    sh = _find_shot(plan, str(body.get("shot_id", "")))
+    refs = [r for r in sh.get("refs", []) or [] if (p.out(shootplan.REFS_DIR) / r).is_file()]
+    if len(refs) >= REF_PER_SHOT:
+        raise ValueError(f"每个镜头最多 {REF_PER_SHOT} 张参考图")
+    m = re.fullmatch(r"data:image/(jpeg|jpg|png|webp);base64,(.+)", str(body.get("data", "")), re.S)
+    if not m:
+        raise ValueError("只支持 JPG / PNG 图片")
+    raw = base64.b64decode(m.group(2), validate=False)
+    if len(raw) > REF_MAX_BYTES:
+        raise ValueError("图片太大了（超过 4MB）")
+    if raw[:3] == b"\xff\xd8\xff":
+        ext = ".jpg"
+    elif raw[:8] == b"\x89PNG\r\n\x1a\n":
+        ext = ".png"
+    else:
+        raise ValueError("只支持 JPG / PNG 图片")
+    folder = p.out(shootplan.REFS_DIR)
+    folder.mkdir(exist_ok=True)
+    name = f"{safe_name(sh['shot_id']) or 'shot'}_{int(time.time() * 1000) % 10**9}{ext}"
+    (folder / name).write_bytes(raw)
+    sh["refs"] = refs + [name]
+    write_json(p.out("shootplan.json"), plan)
+    shootplan.plan_html(p)
+    log.info(f"拍摄脚本 {sh['shot_id']} 加了参考图 {name}（{len(raw) // 1024} KB）")
+    return plan_payload(p)
+
+
+def del_plan_ref(p: Project, body: dict) -> dict:
+    plan = read_json(p.out("shootplan.json"), {}) or {}
+    sh = _find_shot(plan, str(body.get("shot_id", "")))
+    name = str(body.get("name", ""))
+    if name in (sh.get("refs") or []):
+        sh["refs"] = [r for r in sh["refs"] if r != name]
+        f = (p.out(shootplan.REFS_DIR) / name).resolve()
+        if f.parent == p.out(shootplan.REFS_DIR).resolve():
+            f.unlink(missing_ok=True)
+        write_json(p.out("shootplan.json"), plan)
+        shootplan.plan_html(p)
+    return plan_payload(p)
+
+
+def save_plan(p: Project, body: dict) -> dict:
+    """界面里改过的拍摄脚本：改文字、删镜头、加镜头、标必拍。只接受认识的字段。"""
+    plan = read_json(p.out("shootplan.json"), {}) or {}
+    if not plan:
+        raise ValueError("还没有拍摄脚本")
+    days = []
+    for d in body.get("days", []):
+        shots = []
+        for s in d.get("shots", []):
+            if not str(s.get("what", "")).strip():
+                continue
+            row = {k: (bool(s.get(k)) if k == "must_have" else str(s.get(k, "") or "").strip())
+                   for k in ("shot_id", "beat", "what", "framing", "hold", "why", "must_have")}
+            row["sketch"] = sketch.normalize(s.get("sketch"), row["framing"])
+            row["refs"] = [r for r in s.get("refs", []) or []
+                           if isinstance(r, str) and "/" not in r and "\\" not in r
+                           and (p.out(shootplan.REFS_DIR) / r).is_file()]
+            shots.append(row)
+        days.append({"day": int(d.get("day") or len(days) + 1), "where": str(d.get("where", "")).strip(),
+                     "golden_hours": str(d.get("golden_hours", "")).strip(), "shots": shots})
+    plan["days"] = days
+    for k in ("title", "logline"):
+        if k in body:
+            plan[k] = str(body[k])
+    write_json(p.out("shootplan.json"), plan)
+    shootplan.plan_html(p)
+    return plan_payload(p)
 
 
 def story_payload(pid: str) -> dict:
@@ -235,6 +361,10 @@ def job_revise(pid: str, instruction: str, minutes: float, mock: bool, lang: str
 
 def job_plan(pid: str, brief: str, days: int, minutes: float, gear: str, mock: bool, lang: str):
     p = project_dir(pid)
+    p.save_settings(plan_brief=brief, plan_days=days, plan_gear=gear, minutes=minutes)
+    p.out("shootplan_progress.json").unlink(missing_ok=True)      # 新脚本，勾选记录清零
+    for f in (p.out(shootplan.REFS_DIR).glob("*") if p.out(shootplan.REFS_DIR).is_dir() else []):
+        f.unlink(missing_ok=True)                                  # 参考图跟着旧镜头编号，一起清掉
     if mock:
         shootplan.mock_plan(p, brief, days)
     else:
@@ -329,9 +459,47 @@ def _open_path(path: Path):
 RUNNING: dict = {}
 
 
+# ---------------------------------------------------------------- 安全：谁可以调这个后端
+# 后端在本机跑，浏览器里打开的任何网页都能向 127.0.0.1 发请求。以前对所有来源都放行（CORS *），
+# 网页可以读到 /media/../.env 里的 API Key，也能偷偷改设置、花你的 API 额度。
+# 现在只放行：studio 自己的页面、本机开发服务器、Lovable，以及设置里额外填写的网址。
+DEFAULT_ORIGINS = [r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?",
+                   r"https://[\w.-]+\.lovable\.app", r"https://[\w.-]+\.lovableproject\.com",
+                   r"https://(www\.)?lovable\.dev"]
+
+
+def origin_allowed(origin: str) -> bool:
+    if not origin:
+        return True                      # 浏览器直接打开页面、curl 等没有 Origin
+    extra = [o.strip().rstrip("/") for o in str(config.get("allowed_origins") or "").split(",") if o.strip()]
+    if origin.rstrip("/") in extra:
+        return True
+    return any(re.fullmatch(p, origin) for p in DEFAULT_ORIGINS)
+
+
+def host_allowed(host: str) -> bool:
+    """挡住 DNS rebinding：请求必须是发给 127.0.0.1 / localhost 的。"""
+    h = (host or "").rsplit(":", 1)[0] if not (host or "").startswith("[") else host.split("]")[0] + "]"
+    return h in ("127.0.0.1", "localhost", "[::1]", "")
+
+
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     server_version = "vlogai-studio"
+
+    def _guard(self) -> bool:
+        """不允许的来源直接 403。返回 True 表示可以继续。"""
+        origin = self.headers.get("Origin", "")
+        if not host_allowed(self.headers.get("Host", "")):
+            log.warning(f"拒绝请求：Host 不是本机（{self.headers.get('Host')}）")
+            self.json({"error": "forbidden host"}, 403)
+            return False
+        if not origin_allowed(origin):
+            log.warning(f"拒绝来自 {origin} 的请求：{self.command} {self.path.split('?')[0]}"
+                        "（需要的话在设置 → 性能与高级 → 允许访问的网页里添加）")
+            self.json({"error": f"origin not allowed: {origin}"}, 403)
+            return False
+        return True
 
     # -- 日志：GET 只在 DEBUG 级别记录（网页每秒都在轮询），POST 和出错的请求总会记录
     def log_request(self, code="-", size="-"):
@@ -356,12 +524,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- plumbing
     def _cors(self):
-        """允许 Lovable / 任何前端从浏览器直接调这个本地后端。"""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        """只对允许的来源回 CORS 头（见 origin_allowed）。"""
+        origin = self.headers.get("Origin", "")
+        if origin and origin_allowed(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def do_OPTIONS(self):  # noqa: N802
+        if not self._guard():
+            return
         self.send_response(204)
         self._cors()
         self.send_header("Content-Length", "0")
@@ -384,34 +558,58 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(n) or b"{}")
+        if n > 12 * 1024 * 1024:
+            raise ValueError("请求太大了")
+        raw = self.rfile.read(n) if n else b""
+        if raw and "json" not in (self.headers.get("Content-Type") or "").lower():
+            raise ValueError("请求必须是 Content-Type: application/json")
+        return json.loads(raw or b"{}")
 
     def file(self, path: Path):
         if not path.is_file():
             return self.json({"error": "not found"}, 404)
         ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         size = path.stat().st_size
+        start, end, status = 0, size - 1, 200
         rng = self.headers.get("Range")
-        if rng and (m := re.match(r"bytes=(\d*)-(\d*)", rng)):   # 视频拖动进度条要用
-            start = int(m.group(1) or 0)
-            end = int(m.group(2)) if m.group(2) else size - 1
-            end = min(end, size - 1)
-            with path.open("rb") as f:
-                f.seek(start)
-                chunk = f.read(end - start + 1)
-            self.send_response(206)
-            self._cors()
-            self.send_header("Content-Type", ctype)
+        if rng and (m := re.match(r"bytes=(\d*)-(\d*)", rng)) and size:   # 视频拖动进度条要用
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            elif m.group(2):                       # bytes=-500：最后 500 字节
+                start = max(0, size - int(m.group(2)))
+            if start > end:
+                self.send_response(416)
+                self._cors()
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Length", str(len(chunk)))
-            self.end_headers()
-            self.wfile.write(chunk)
+        self.send_header("Content-Length", str(max(0, end - start + 1)))
+        self.end_headers()
+        if self.command == "HEAD" or not size:
             return
-        self._send(200, path.read_bytes(), ctype, {"Accept-Ranges": "bytes"})
+        with path.open("rb") as f:                 # 分块发送，大视频不再整个读进内存
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = f.read(min(1 << 20, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
 
     # -- routing
     def do_GET(self):  # noqa: N802
+        if not self._guard():
+            return
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         path = u.path
@@ -469,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(read_json(p.out("outline.json"), {}) or {})
             m = re.fullmatch(r"/api/projects/([^/]+)/shootplan", path)
             if m:
-                return self.json(read_json(project_dir(urllib.parse.unquote(m.group(1))).out("shootplan.json"), {}) or {})
+                return self.json(plan_payload(project_dir(urllib.parse.unquote(m.group(1)))))
             m = re.fullmatch(r"/api/projects/([^/]+)/story", path)
             if m:
                 return self.json(story_payload(urllib.parse.unquote(m.group(1))))
@@ -479,11 +677,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             log.debug(f"浏览器提前断开：GET {path}")
+        except ValueError as e:
+            return self.json({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001
             log.exception(f"接口出错：GET {path}")
             return self.json({"error": f"{e.__class__.__name__}: {e}"}, 500)
 
     def do_POST(self):  # noqa: N802
+        if not self._guard():
+            return
         u = urllib.parse.urlparse(self.path)
         path = u.path
         try:
@@ -510,10 +712,22 @@ class Handler(BaseHTTPRequestHandler):
                 _open_path(PROJECTS)
                 return self.json({"ok": True})
             if path == "/api/projects":
-                name = (b.get("name") or "").strip() or Path(b["footage"]).name
-                pid = re.sub(r"[^\w\-. ]", "", name).strip() or "project"
-                runner.start("扫描素材", pid, job_scan, pid, b["footage"])
-                return self.json({"id": pid})
+                footage = (b.get("footage") or "").strip()
+                name = (b.get("name") or "").strip() or (Path(footage).name if footage else "")
+                pid = safe_name(name)
+                if not pid:
+                    raise ValueError("请填写项目名称")
+                if not footage:              # 出发前：只建项目，先写拍摄脚本，素材以后再加
+                    if (PROJECTS / pid).exists():
+                        raise ValueError(f"已经有同名项目：{pid}")
+                    p = project_dir(pid)
+                    p.save_settings(created=p.settings().get("created") or date.today().isoformat())
+                    log.info(f"新建项目（还没有素材）：{pid}")
+                    return self.json({"id": pid, "started": None})
+                if not Path(footage).expanduser().is_dir():
+                    raise ValueError(f"素材文件夹不存在：{footage}")
+                runner.start("扫描素材", pid, job_scan, pid, footage)
+                return self.json({"id": pid, "started": "scan"})
 
             m = re.fullmatch(r"/api/projects/([^/]+)/(\w+)", path)
             if not m:
@@ -546,7 +760,8 @@ class Handler(BaseHTTPRequestHandler):
                 runner.start("导出时间线", pid, job_export, pid)
             elif action == "recheck":
                 runner.start("重新校验", pid, job_recheck, pid)
-            elif action in ("timeline", "restore", "flag", "settings", "open_folder"):
+            elif action in ("timeline", "restore", "flag", "settings", "open_folder", "plan_check", "plan_save",
+                            "plan_ref", "plan_ref_del"):
                 return self.json(self._sync_action(pid, action, b))
             else:
                 return self.json({"error": f"unknown action {action}"}, 404)
@@ -572,17 +787,18 @@ def _sync_action(self, pid: str, action: str, b: dict):
     if action == "flag":
         fl = flags(p)
         sid, kind, on = b.get("shot"), b.get("flag"), bool(b.get("on"))
-        if kind not in ("must", "exclude") or not sid:
-            raise ValueError("flag 只能是 must 或 exclude")
-        other = "exclude" if kind == "must" else "must"
+        if kind not in ("must", "exclude", "unprotect") or not sid:
+            raise ValueError("flag 只能是 must、exclude 或 unprotect")
         fl[kind] = [x for x in fl[kind] if x != sid] + ([sid] if on else [])
-        if on:
-            fl[other] = [x for x in fl[other] if x != sid]
+        if on:                         # 三种标记互斥
+            for other in ("must", "exclude", "unprotect"):
+                if other != kind:
+                    fl[other] = [x for x in fl[other] if x != sid]
         write_json(p.root / "flags.json", fl)
         return {"flags": fl}
     if action == "settings":
         keep = {}
-        for k in ("brief", "music", "lang", "subject"):
+        for k in ("brief", "music", "lang", "subject", "plan_brief", "plan_gear"):
             if k in b and b[k] is not None:
                 keep[k] = str(b[k]).strip()
         if keep.get("music") and not Path(keep["music"]).expanduser().is_file():
@@ -591,6 +807,8 @@ def _sync_action(self, pid: str, action: str, b: dict):
             keep["minutes"] = float(b["minutes"])
         if "vertical" in b:
             keep["vertical"] = bool(b["vertical"])
+        if b.get("plan_days") not in (None, ""):
+            keep["plan_days"] = max(1, min(30, int(b["plan_days"])))
         s = p.settings()
         s.update(keep)
         write_json(p.settings_json, s)
@@ -598,6 +816,19 @@ def _sync_action(self, pid: str, action: str, b: dict):
     if action == "open_folder":
         _open_path(p.root)
         return {"ok": True}
+    if action == "plan_check":         # 拍摄清单打勾
+        prog = read_json(p.out("shootplan_progress.json"), {}) or {}
+        done = [x for x in prog.get("done", []) if x != b.get("shot_id")]
+        if b.get("done"):
+            done.append(str(b.get("shot_id")))
+        write_json(p.out("shootplan_progress.json"), {"done": done})
+        return {"done": done}
+    if action == "plan_save":
+        return save_plan(p, b)
+    if action == "plan_ref":           # 给镜头附参考图
+        return add_plan_ref(p, b)
+    if action == "plan_ref_del":
+        return del_plan_ref(p, b)
     raise ValueError(action)
 
 
@@ -621,6 +852,30 @@ def _startup_info():
              f"并行 {cfg['workers']} · 语音转写 {cfg['whisper_model'] if cfg['whisper'] else '关'}")
 
 
+class _Server(ThreadingHTTPServer):
+    # Windows 上 SO_REUSEADDR 允许两个程序同时占着同一个端口：旧窗口里的 studio 没关时，
+    # 新开的 studio 也能“启动成功”，但请求会被旧的那个接走（网页是新的、后端是旧的）。
+    # 所以 Windows 上改用独占端口。
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        import socket
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def _studio_already_on(port: int) -> str | None:
+    """这个端口上是不是已经有一个 vlogai studio 在跑？是的话返回它的版本号。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/env", timeout=0.6) as r:
+            d = json.loads(r.read().decode("utf-8"))
+            return str(d.get("version") or "?") if "has_key" in d else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def serve(port: int | None = None, open_browser: bool = True):
     applog.setup(config.get("log_level"))
     _startup_info()
@@ -628,9 +883,15 @@ def serve(port: int | None = None, open_browser: bool = True):
     port = int(port or config.get("port"))
     PROJECTS.mkdir(parents=True, exist_ok=True)
     httpd, chosen = None, port
+    log.info(f"代码位置 {Path(__file__).resolve().parents[1]}")
     for cand in range(port, port + 12):          # 端口被占就自动换一个，不让它拦住你
+        other = _studio_already_on(cand)
+        if other:
+            log.warning(f"端口 {cand} 上已经有一个 vlogai studio 在运行（版本 {other}），多半是之前的窗口没关。"
+                        f"它跑的可能是旧代码——请关掉那个窗口（或在任务管理器里结束多余的 python.exe）。这次先换一个端口。")
+            continue
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", cand), Handler)
+            httpd = _Server(("127.0.0.1", cand), Handler)
             chosen = cand
             break
         except OSError as e:
@@ -653,7 +914,7 @@ def serve(port: int | None = None, open_browser: bool = True):
             log.info(msg)
         else:
             log.warning(msg + "  ← 看起来不对：应以 sk-ant- 开头且不含空格")
-        if kh["base_url"]:
+        if kh["base_url"] and kh["base_url"].rstrip("/") != "https://api.anthropic.com":
             log.warning(f"设置了 API 地址 {kh['base_url']}，请求不会直接发到 Anthropic")
     log.info(f"已启动：{url}   （关闭：在这个窗口按 Ctrl+C）")
     if open_browser:

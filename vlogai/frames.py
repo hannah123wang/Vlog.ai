@@ -98,9 +98,11 @@ def extract(project: Project, workers: int = 4) -> list[dict]:
         shots = []
         for k, (st, en) in enumerate(_detect_scenes(clip["path"], clip["duration"]), 1):
             sid = f"{clip['id']}_s{k:02d}"
-            if sid in old:
+            if sid in old and old[sid].get("src") == clip["path"]:
                 shots.append(old[sid])
                 continue
+            if sid in old:   # 同一个 id 以前对应别的文件（旧版本重新编号造成的）：旧日志作废
+                (project.logs_dir / f"{sid}.json").unlink(missing_ok=True)
             dur = en - st
             n = max(1, min(max_n, math.ceil(dur / every)))
             times = [st + dur * (i + 0.5) / n for i in range(n)]

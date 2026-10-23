@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from .common import log, read_json
 
 # 规则：(判断函数, 原因, 优先级)  优先级高的在裁剪时后被放弃
@@ -24,12 +26,39 @@ MIN_QUALITY = 0.18          # 糊成一片的镜头，再重要也救不回来
 MAX_SHARE = 0.65            # 受保护镜头最多占成片的六成，否则等于没得剪
 
 
-def protected(project, shots: list[dict], target_seconds: float | None = None) -> dict[str, str]:
-    """返回 {shot_id: 保护原因}。shots 需要带 log 字段（load_logged_shots 的输出）。"""
+USER_MUST = "你标为必用"     # 界面里点了“标为必用”的镜头，优先级最高
+
+
+def _num(v, default: float) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def user_flags(project) -> dict:
+    f = read_json(project.root / "flags.json", {}) or {}
+    return {k: set(f.get(k, [])) for k in ("must", "exclude", "unprotect")}
+
+
+def protected(project, shots: list[dict], target_seconds: float | None = None,
+              quiet: bool = False) -> dict[str, str]:
+    """返回 {shot_id: 保护原因}。shots 需要带 log 字段（load_logged_shots 的输出）。
+
+    用户在界面里的选择优先于自动规则：标为必用 → 一定保护；点了“不保护” → 自动规则不再保护它；
+    排除的镜头不会出现在这里（load_logged_shots 已经把它们去掉了）。"""
+    fl = user_flags(project)
     hits: list[tuple[int, str, str, float]] = []   # (优先级, id, 原因, 时长)
     for s in shots:
+        if s["id"] in fl["exclude"]:
+            continue
         lg = s.get("log") or read_json(project.logs_dir / f"{s['id']}.json", {}) or {}
-        if s.get("quality", 1) < MIN_QUALITY:
+        best = lg.get("best_moment") or {}
+        dur = min(max(1.5, _num(best.get("end"), 4) - _num(best.get("start"), 0)), s["duration"])
+        if s["id"] in fl["must"]:
+            hits.append((120, s["id"], USER_MUST, dur))
+            continue
+        if s["id"] in fl["unprotect"] or s.get("quality", 1) < MIN_QUALITY:
             continue
         for test, reason, prio in RULES:
             try:
@@ -37,9 +66,7 @@ def protected(project, shots: list[dict], target_seconds: float | None = None) -
             except Exception:  # noqa: BLE001
                 ok = False
             if ok:
-                best = lg.get("best_moment") or {}
-                dur = max(1.5, float(best.get("end", 4)) - float(best.get("start", 0)))
-                hits.append((prio, s["id"], reason, min(dur, s["duration"])))
+                hits.append((prio, s["id"], reason, dur))
                 break
 
     hits.sort(key=lambda h: -h[0])
@@ -51,12 +78,12 @@ def protected(project, shots: list[dict], target_seconds: float | None = None) -
                 continue
             total += dur
             kept.append((prio, sid, reason, dur))
-        if len(kept) < len(hits):
+        if len(kept) < len(hits) and not quiet:
             log(f"  受保护镜头超出上限，按优先级保留 {len(kept)}/{len(hits)} 个")
         hits = kept
 
     out = {sid: reason for _, sid, reason, _ in hits}
-    if out:
+    if out and not quiet:
         by_reason: dict[str, int] = {}
         for r in out.values():
             by_reason[r] = by_reason.get(r, 0) + 1
@@ -75,8 +102,8 @@ def must_include_block(prot: dict[str, str], shots: list[dict]) -> str:
         if not s:
             continue
         lg = s.get("log") or {}
-        rows.append(f'{{"id":"{sid}","reason":"{reason}","sum":"{(lg.get("summary") or "")[:60]}"}}')
-    return "[" + ",".join(rows) + "]"
+        rows.append({"id": sid, "reason": reason, "sum": (lg.get("summary") or "")[:60]})
+    return json.dumps(rows, ensure_ascii=False)     # 摘要里有引号也不会把 JSON 弄坏
 
 
 def enforce(plan: dict, prot: dict[str, str], shots: list[dict]) -> dict:
@@ -98,8 +125,8 @@ def enforce(plan: dict, prot: dict[str, str], shots: list[dict]) -> dict:
             continue
         lg = s.get("log") or {}
         best = lg.get("best_moment") or {}
-        a = max(0.0, min(float(best.get("start", 0) or 0), s["duration"] - 1.5))
-        b = min(s["duration"], max(a + 1.5, float(best.get("end", a + 4) or a + 4)))
+        a = max(0.0, min(_num(best.get("start"), 0), s["duration"] - 1.5))
+        b = min(s["duration"], max(a + 1.5, _num(best.get("end"), a + 4)))
         # 插在同一天的最后一个片段之后，没有同天的就放在结尾前
         pos, chapter = len(tl), (tl[-1]["chapter"] if tl else "")
         for i, t in enumerate(tl):

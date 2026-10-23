@@ -102,8 +102,10 @@ Four steps, left to right:
    sentence ("open with something stronger, fewer empty landscapes")
 4. **导出 / Export** — render an MP4 preview, or export the timeline to Resolve / Premiere
 
-The backend has CORS enabled, so a separately hosted front end (Lovable, Vercel, anything) can talk
-to it at `http://127.0.0.1:8900`. Use Chrome for that: Safari refuses HTTPS pages calling
+A separately hosted front end can talk to the backend at `http://127.0.0.1:8900`. Pages on
+localhost and Lovable are allowed out of the box; add any other site (e.g. your Vercel app) under
+Settings → Advanced → “Allowed web pages”. POST requests must send `Content-Type: application/json`
+(see [API.md](./API.md)). Use Chrome for that: Safari refuses HTTPS pages calling
 `http://127.0.0.1`.
 
 ## Quick start: the command line

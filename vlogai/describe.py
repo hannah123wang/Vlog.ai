@@ -5,11 +5,12 @@ Results are cached per shot in work/logs/, so re-running only pays for new shots
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .common import Project, log, read_json, write_json
-from .llm import AuthError
+from .llm import FatalError
 from .transcribe import speech_for
 
 SYSTEM = """You are an assistant editor logging raw travel-vlog footage.
@@ -53,7 +54,11 @@ def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4,
     if not todo:
         return
 
+    stop = threading.Event()             # 一个镜头遇到致命错误（Key 不对、余额不足）后，其余镜头直接跳过
+
     def work(s: dict):
+        if stop.is_set():
+            return
         speech = speech_for(project, s["clip_id"], s["start"], s["end"])
         meta = {"file": Path(s["src"]).name, "day": s["day"], "recorded": s["created"],
                 "gps": s["gps"], "duration": s["duration"], "quality": s["quality"],
@@ -66,8 +71,9 @@ def describe_all(project: Project, llm, lang: str = "Chinese", workers: int = 4,
                     or "(not specified — treat the person who recurs most as the main subject)")
         try:
             d = llm.describe(SYSTEM, prompt, [f["path"] for f in s["frames"]])
-        except AuthError:
-            raise                     # Key 不对：整步停下，不要假装“完成”
+        except FatalError:
+            stop.set()
+            raise                     # Key 不对 / 余额不足：整步停下，不要假装“完成”
         except Exception as e:  # noqa: BLE001
             log(f"  {s['id']} 分析失败，稍后重跑会再试: {e}")
             return

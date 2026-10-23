@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 
 from ..applog import log, pipeline_line
+from ..llm import FatalError
 
 PROGRESS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
@@ -107,6 +108,13 @@ class JobRunner:
                 stream.flush()
                 job.status = "error"
                 job.error = str(e.code) if isinstance(e.code, str) else f"程序退出（代码 {e.code}）"
+                job.add_line("✗ " + job.error, to_log=False)
+                log.error(f"✗ 任务失败「{name}」 项目 {project}：{job.error}")
+            except FatalError as e:
+                # Key 不对、余额不足这类：只给一句能看懂的话，不附 Python 堆栈
+                stream.flush()
+                job.status = "error"
+                job.error = str(e)
                 job.add_line("✗ " + job.error, to_log=False)
                 log.error(f"✗ 任务失败「{name}」 项目 {project}：{job.error}")
             except BaseException as e:  # noqa: BLE001

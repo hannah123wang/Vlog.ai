@@ -140,7 +140,8 @@ def _save(project: Project, plan: dict, note: str) -> None:
     plan["_note"] = note
     plan["_created"] = datetime.now().isoformat(timespec="seconds")
     project.versions_dir.mkdir(exist_ok=True)
-    n = len(list(project.versions_dir.glob("story_v*.json"))) + 1
+    nums = [int(f.stem[7:]) for f in project.versions_dir.glob("story_v*.json") if f.stem[7:].isdigit()]
+    n = max(nums, default=0) + 1          # 删过某个版本文件也不会覆盖已有版本
     write_json(project.versions_dir / f"story_v{n}.json", plan)
     write_json(project.story_json, plan)
     log(f"故事版本 v{n}：《{plan.get('title','')}》 {len(plan['timeline'])} 个镜头，"

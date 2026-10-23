@@ -8,5 +8,10 @@ if hasattr(sys.stdout, "reconfigure"):      # Windows 控制台默认 GBK，中�
         pass
 
 from .cli import main
+from .llm import FatalError
 
-main()
+try:
+    main()
+except FatalError as e:          # Key 不对、余额不足：一句话说清楚，不打印 Python 堆栈
+    print(f"\n[vlogai] ✗ {e}", file=sys.stderr)
+    sys.exit(1)

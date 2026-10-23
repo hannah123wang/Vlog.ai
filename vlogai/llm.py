@@ -19,8 +19,52 @@ from pathlib import Path
 
 from . import config
 
-class AuthError(RuntimeError):
+class FatalError(RuntimeError):
+    """重试也没用、剩下的镜头也不用再跑的错误（Key 不对、余额不足、模型名写错……）。
+    任务面板只显示这句话，不附带 Python 报错堆栈。"""
+
+
+class AuthError(FatalError):
     """API Key 不对：没必要重试，也没必要继续跑剩下的镜头。"""
+
+
+class BillingError(FatalError):
+    """账户余额不足（400 credit balance is too low）。"""
+
+
+BILLING_URL = "https://platform.claude.com/settings/billing"
+
+
+def _api_message(e) -> str:
+    """从 anthropic 的异常里取出服务器给的那句话。"""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") if isinstance(body.get("error"), dict) else body
+        if err.get("message"):
+            return str(err["message"])
+    return str(e)
+
+
+def fatal_from(e, model: str = ""):
+    """把 anthropic 的异常翻成一句能看懂、知道下一步怎么做的话；不是致命错误就返回 None。"""
+    try:
+        import anthropic
+    except ImportError:
+        return None
+    msg = _api_message(e)
+    if isinstance(e, anthropic.AuthenticationError):
+        h = key_hint()
+        return AuthError(f"API Key 无效（401）。程序用的是 {h['hint']}（{h['length']} 位，来自 "
+                         f"{h['source']}）。检查这个 Key 是否完整、是否已被删除；可以在设置页换一个 Key 再重试。")
+    if isinstance(e, anthropic.BadRequestError) and "credit balance" in msg.lower():
+        h = key_hint()
+        return BillingError(f"API 余额不足。这个 Key（{h['hint']}）所在组织的额度用完了，到 {BILLING_URL} 充值后再点重试；"
+                            "claude.ai 的订阅和 API 额度是分开的。已经做完的部分（比如看过的镜头）不会重复计费。")
+    if isinstance(e, anthropic.PermissionDeniedError):
+        return FatalError(f"没有权限（403）：{msg}。检查这个 Key 所在的组织 / 工作区是否能用这个模型。")
+    if isinstance(e, anthropic.NotFoundError):
+        return FatalError(f"找不到模型 {model}（404）。到设置页换一个看片 / 编故事模型再重试。")
+    return None
 
 
 def _read_dotenv() -> dict:
@@ -95,6 +139,9 @@ def test_key(key: str | None = None) -> dict:
     except anthropic.AuthenticationError:
         return {"ok": False, "reason": "401：Key 无效。检查是否复制完整、是否已在 console 里删除"}
     except Exception as e:  # noqa: BLE001
+        fatal = fatal_from(e, model_for("describe"))
+        if fatal:
+            return {"ok": False, "reason": str(fatal)}
         return {"ok": False, "reason": f"{e.__class__.__name__}: {e}"}
 
 
@@ -145,7 +192,7 @@ class ClaudeLLM:
         h = key_hint()
         print(f"[vlogai] 使用 API Key {h['hint']}（{h['length']} 位，来自 {src}）"
               + (f"，ANTHROPIC_BASE_URL={h['base_url']}" if h["base_url"] else ""))
-        self._auth_error = anthropic.AuthenticationError
+        self._bad_request = anthropic.BadRequestError
         self.client = make_client(key)
         self.describe_model = model_for("describe")
         self.story_model = model_for("story")
@@ -161,12 +208,11 @@ class ClaudeLLM:
                 self.usage["input_tokens"] += resp.usage.input_tokens
                 self.usage["output_tokens"] += resp.usage.output_tokens
                 return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-            except self._auth_error as e:
-                h = key_hint()
-                raise AuthError(f"API Key 无效（401）。程序用的是 {h['hint']}（{h['length']} 位，来自 "
-                                f"{h['source']}）。检查这个 Key 是否完整、是否已被删除；可以在设置页换一个 Key 再重试。") from e
             except Exception as e:  # noqa: BLE001
-                if attempt == 2:
+                fatal = fatal_from(e, model)
+                if fatal:
+                    raise fatal from e
+                if attempt == 2 or isinstance(e, self._bad_request):   # 400：请求本身有问题，重试也一样
                     raise
                 time.sleep(3 * (attempt + 1))
                 print(f"[vlogai] API 重试 ({e.__class__.__name__}: {str(e)[:200]})")
@@ -203,6 +249,10 @@ class MockLLM:
             "story_roles": ["b-roll"], "highlight": round(3 + 6 * q),
             "best_moment": {"start": 0.0, "end": min(meta["duration"], 4.0)},
             "keep_audio": bool(meta.get("speech")), "tags": [name],
+            # 关键画面保护要用的几项（离线模拟：按文件名和画质给个确定的答案）
+            "faces_clear": "selfie" in name.lower(), "subject_present": "selfie" in name.lower(),
+            "people_together": bool(meta.get("speech")),
+            "scenery_value": round(2 + 8 * q),
         }
 
     def plan(self, system: str, prompt: str, max_tokens: int = 16000) -> dict:
