@@ -1,4 +1,31 @@
-version_number: v 1.1
+version_number: v 1.2
+
+2026 Oct 23
+v 1.2 · settings
+
+== 1. 设置页：更多参数可以手动调（config.py、app.js） ==
+- 以前写死在代码里的参数都搬到了设置页，每个数字框旁边显示允许范围，改过的项有“默认 x”按钮一键恢复；
+  保存前先在网页里检查范围，出错时说清楚是哪一项
+- 抽帧与切镜头（“更多参数”里）：忽略多短的文件、每个镜头至少多长、是否用代理 / 代理宽度 / 代理帧率 / 显卡解码、
+  清晰度基准、理想亮度；抽帧间隔可以到 0.5 秒，每个镜头最多可选 8 帧
+- 新增“关键画面保护”：总开关；正脸 / 同框 / 结尾三条规则开关；风景分、精彩度门槛；受保护镜头最多占成片多少；画质下限
+- 新增“剪辑节奏”：成片长于几分钟按长片剪、短片 / 长片平均每段几秒、对齐节拍时最多拉长 / 缩短多少、拍摄脚本每天几个镜头
+- 预览渲染：帧率、画质（CRF）、字幕字号和位置、音乐淡入 / 淡出、说话时音乐压低力度、同时渲染几段
+- 性能与高级：API 出错时重试几次
+- 修复：命令行渲染以前完全不看设置页（音乐音量、压低音乐、字幕、字体、1080p 都用固定值）；命令行的并行数和 Whisper 模型也改为默认用设置页的
+- API Key 的创建链接改成 platform.claude.com
+
+== 2. 改动的文件 ==
+vlogai/config.py、frames.py、probe.py、protect.py、story.py、beats.py、render.py、shootplan.py、llm.py、cli.py
+vlogai/studio/server.py（GET /api/settings 增加 rules：每项的取值范围）
+vlogai/studio/web/app.js、i18n.js、style.css
+API.md
+
+== 升级注意 ==
+- 要重启 studio（先关掉所有旧的 studio 窗口）
+- 所有新参数的默认值和以前写死的数值一样：不改设置，结果和 v 1.1 完全相同
+- 切镜头的代理文件名里带了尺寸和帧率（proxies/c0001_320p10.mp4）；改了代理宽度或帧率会生成新的代理，旧文件可以手动删掉
+- 命令行渲染现在会用设置页的音乐音量、压低音乐、字幕、字体和清晰度；命令行参数写了的仍然优先
 
 2026 Oct 22
 shootplan + protect
@@ -28,24 +55,12 @@ shootplan + protect
 - 已经切好镜头的素材不再重复检测：“继续看片”、换 Key 重跑时直接沿用（以前每次都把所有长视频重新切一遍）
 - 转代理失败时自动退回到原片上检测；新做代理时在日志里报一下用时
 
-== 4. 设置页：更多参数可以手动调（config.py、app.js） ==
-- 以前写死在代码里的参数都搬到了设置页，每个数字框旁边显示允许范围，改过的项有“默认 x”按钮一键恢复；
-  保存前先在网页里检查范围，出错时说清楚是哪一项
-- 抽帧与切镜头（“更多参数”里）：忽略多短的文件、每个镜头至少多长、是否用代理 / 代理宽度 / 代理帧率 / 显卡解码、
-  清晰度基准、理想亮度；抽帧间隔可以到 0.5 秒，每个镜头最多可选 8 帧
-- 新增“关键画面保护”：总开关；正脸 / 同框 / 结尾三条规则开关；风景分、精彩度门槛；受保护镜头最多占成片多少；画质下限
-- 新增“剪辑节奏”：成片长于几分钟按长片剪、短片 / 长片平均每段几秒、对齐节拍时最多拉长 / 缩短多少、拍摄脚本每天几个镜头
-- 预览渲染：帧率、画质（CRF）、字幕字号和位置、音乐淡入 / 淡出、说话时音乐压低力度、同时渲染几段
-- 性能与高级：API 出错时重试几次
-- 修复：命令行渲染以前完全不看设置页（音乐音量、压低音乐、字幕、字体、1080p 都用固定值）；命令行的并行数和 Whisper 模型也改为默认用设置页的
-- API Key 的创建链接改成 platform.claude.com
-
-== 5. 安全修复（server.py） ==
+== 4. 安全修复（server.py） ==
 - 修复：网页可以通过 /media/%2E%2E/.env 读到 API Key（路径穿越）
 - 修复：任何网站都能偷偷调用本地后端（改设置、花额度）。现在只允许本机网页和 Lovable，其他网站要在设置页“允许访问的网页”里添加
 - 挡住 DNS rebinding（Host 必须是本机）；POST 必须是 application/json；项目名过滤特殊字符
 
-== 6. Bug 修复 ==
+== 5. Bug 修复 ==
 - 重新扫描时，如果新加的视频拍摄时间更早，镜头编号会整体错位（日志张冠李戴）（probe.py、frames.py）
 - 删过某个版本文件后，新存的版本会覆盖已有的版本（story.py）
 - 每次打开素材页，保护规则都往任务日志里刷屏；必用列表里的引号会弄坏提示词；best_moment 为空时崩溃（protect.py）
@@ -60,7 +75,7 @@ shootplan + protect
 - 后端没有发草图时（比如后端还是旧版本），草图格子直接隐藏，不再每个镜头都显示“保存后更新草图”（app.js）
 
 == 修改的文件 ==
-vlogai/shootplan.py、sketch.py（新增）、protect.py、probe.py、frames.py、story.py、beats.py、render.py、llm.py、describe.py、cli.py、config.py、__main__.py
+vlogai/shootplan.py、sketch.py（新增）、protect.py、probe.py、frames.py、story.py、llm.py、describe.py、cli.py、config.py、__main__.py
 vlogai/studio/server.py、jobs.py、web/app.js、web/i18n.js、web/style.css
 API.md、README.md、LOVABLE_HANDOFF.md
 
