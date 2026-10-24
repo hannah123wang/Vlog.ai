@@ -27,6 +27,8 @@ const shotType = (t) => (SHOT_TYPES[t] ? tr(SHOT_TYPES[t]) : t || '');
 const enc = encodeURIComponent;
 const locale = () => I18N.locale();
 const P = () => `/api/projects/${enc(S.pid)}`;
+/* 镜头工坊做出的片段也在 /shots 里（时间线要用），但素材页不显示它们 */
+function setShots(list) { S.byId = Object.fromEntries(list.map((s) => [s.id, s])); S.shots = list.filter((s) => !s.lab); }
 const jobRunning = () => !!(S.job && S.job.status === 'running');
 const dis = () => (jobRunning() ? 'disabled' : '');
 const media = (name, mt) => `/media/${enc(S.pid)}/${name}?t=${mt || Date.now()}`;
@@ -138,13 +140,14 @@ async function browse(kind, start) {
 /* ---------------------------------------------------------------- data */
 async function loadProjects() { S.projects = (await api('/api/projects')).projects; }
 async function loadProject() {
+  S.lab = null;                       // 镜头工坊的数据在打开那一页时再读
   if (!S.pid) { S.p = null; S.shots = []; S.byId = {}; S.outline = null; S.story = null; S.versions = []; S.plan = null; S.planEdit = null; return; }
   const [p, sh, ol, st, vs, pl] = await Promise.all([
     api(P()), api(`${P()}/shots`), api(`${P()}/outline`), api(`${P()}/story`), api(`${P()}/versions`),
     api(`${P()}/shootplan`).catch(() => ({}))]);
   S.plan = pl && pl.days ? pl : null;
   if (!S.planDirty) planCopy();
-  S.p = p; S.shots = sh.shots; S.byId = Object.fromEntries(S.shots.map((s) => [s.id, s]));
+  S.p = p; setShots(sh.shots);
   S.story = st.timeline && st.timeline.length ? st : null;
   S.versions = vs.versions;
   S.outlineServer = JSON.stringify(ol.beats || null);
@@ -164,7 +167,7 @@ function resetTimeline() {
 }
 async function switchProject(pid) {
   S.pid = pid; store('project', pid);
-  S.fsel = null; S.day = 'all'; S.tsel = 0; S.outlineDirty = false; S.tlDirty = false; S.planDirty = false; S.planDay = 0;
+  S.fsel = null; S.day = 'all'; S.tsel = 0; S.outlineDirty = false; S.tlDirty = false; S.planDirty = false; S.planDay = 0; S.lb = null;
   await loadProject();
   render();
 }
@@ -196,7 +199,7 @@ async function pollJob() {
     tick += 1;
     if (S.page === 'footage' && j.project === S.pid && tick % 3 === 0) {
       S.p = await api(P()).catch(() => S.p);
-      if (tick % 6 === 0) { const sh = await api(`${P()}/shots`).catch(() => null); if (sh) { S.shots = sh.shots; S.byId = Object.fromEntries(S.shots.map((s) => [s.id, s])); } }
+      if (tick % 6 === 0) { const sh = await api(`${P()}/shots`).catch(() => null); if (sh) setShots(sh.shots); }
       renderFootageLive();
     }
     pollTimer = setTimeout(pollJob, 900);
@@ -229,7 +232,7 @@ function renderHeader() {
   $('#projectSelect').innerHTML = (S.projects.length ? S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === S.pid ? 'selected' : ''}>${esc(p.name)}</option>`).join('') : `<option value="">${tr('还没有项目')}</option>`)
     + `<option value="__new">${tr('＋ 新建项目…')}</option>`;
   const p = S.p || {};
-  const steps = [['plan', '拍摄脚本', !!p.has_plan], ['footage', '素材', p.logged > 0], ['story', '故事线', !!p.has_outline], ['timeline', '时间线', !!p.has_story], ['export', '导出', !!p.has_xml]];
+  const steps = [['plan', '拍摄脚本', !!p.has_plan], ['footage', '素材', p.logged > 0], ['story', '故事线', !!p.has_outline], ['timeline', '时间线', !!p.has_story], ['lab', '镜头工坊', !!(S.lab && S.lab.assets && S.lab.assets.length)], ['export', '导出', !!p.has_xml]];
   $('#steps').innerHTML = steps.map(([id, name, done], i) => `<a href="#${id}" ${S.page === id ? 'aria-current="page"' : ''}>
     ${done && S.page !== id ? '<span class="done">✓</span>' : `<span class="n">${i}</span>`}${tr(name)}</a>`).join('');
   $('#mockToggle').checked = mockOn();
@@ -272,14 +275,15 @@ function renderJob() {
 
 function render() {
   const page = (location.hash || '#footage').slice(1);
-  S.page = ['plan', 'footage', 'story', 'timeline', 'export', 'settings', 'logs'].includes(page) ? page : 'footage';
+  S.page = ['plan', 'footage', 'story', 'timeline', 'lab', 'export', 'settings', 'logs'].includes(page) ? page : 'footage';
   document.body.classList.toggle('on-settings', S.page === 'settings');
   renderHeader();
   const active = document.activeElement;
   const keep = active && active.id ? { id: active.id, a: active.selectionStart, b: active.selectionEnd } : null;
-  $('#app').innerHTML = S.page === 'settings' ? viewSettings() : S.page === 'logs' ? viewLogs() : !S.pid || !S.p ? viewWelcome() : { plan: viewPlan, footage: viewFootage, story: viewStory, timeline: viewTimeline, export: viewExport }[S.page]();
+  $('#app').innerHTML = S.page === 'settings' ? viewSettings() : S.page === 'logs' ? viewLogs() : !S.pid || !S.p ? viewWelcome() : { plan: viewPlan, footage: viewFootage, story: viewStory, timeline: viewTimeline, lab: viewLab, export: viewExport }[S.page]();
   if (S.pid && S.p && S.page === 'timeline') { renderTracks(); renderEditor(); renderSavebar(); }
   if (S.page === 'logs') { renderLogRows(true); if (S.logLevel === 'USAGE' ? !S.usage : !S.logs) refreshLogs(); }
+  if (S.page === 'lab') cropMount();
   if (keep) {
     const el = document.getElementById(keep.id);
     if (el) { el.focus(); try { if (keep.a != null) el.setSelectionRange(keep.a, keep.b); } catch (e) { /* not text */ } }
@@ -469,6 +473,430 @@ async function newPlanProject(name) {
   location.hash = '#plan';
 }
 
+
+/* ---------------------------------------------------------------- 4 镜头工坊 */
+const LAB_TOOLS = [['fill', '补镜头'], ['slowmo', '慢动作'], ['crop', '裁切特写']];
+const LAB_KIND = { fill: '补镜头', slowmo: '慢动作', crop: '裁切特写' };
+function labState() {
+  if (!S.lb) S.lb = { tool: 'fill', shot: null, a: 0, b: 0, t: 0, box: null, motion: 'push_in', speed: 0.5, method: 'auto',
+    seconds: 5, gap: '', note: '', prompt: '', insert: 'end', faces: null, faceMethod: '', still: '', still_t: null, preview: '', busy: '',
+    cr: { mode: 'fixed', keys: null, edit: 1, tight: 0.38, tracked: null, seed: null } };
+  return S.lb;
+}
+async function loadLab() {
+  try { S.lab = await api(`${P()}/lab`); } catch (e) { S.lab = { error: /not found|404/i.test(e.message) ? tr('后端还是旧版本，没有镜头工坊接口。重启 studio 后再打开。') : e.message, assets: [], gaps: [] }; }
+}
+/** 选中一个镜头（从素材页、时间线、或工坊里的“换一个镜头”进来） */
+async function labPick(shotId, opts = {}) {
+  const L = labState(), s = S.byId[shotId];
+  if (!s) return;
+  L.shot = shotId; L.faces = null; L.box = null; L.still = ''; L.preview = '';
+  L.cr.keys = null; L.cr.tracked = null; L.cr.seed = null;
+  L.a = opts.a ?? 0; L.b = opts.b ?? +s.duration.toFixed(2); L.t = opts.t ?? +(s.duration / 2).toFixed(2);
+  if (opts.tool) L.tool = opts.tool;
+  if (opts.insert != null) L.insert = String(opts.insert);
+  if (S.page === 'lab') render();
+  labLoadMedia();
+}
+async function labLoadMedia() {
+  const L = labState(); if (!L.shot) return;
+  const sid = L.shot;
+  if (L.tool === 'slowmo' || L.tool === 'crop') {
+    if (!L.preview) {
+      L.busy = 'preview'; labMediaRender();
+      const r = await act(() => api(`${P()}/lab_preview`, { shot_id: sid }));
+      if (L.shot === sid) { L.preview = r ? r.url : ''; L.busy = ''; labMediaRender(); }
+    }
+  } else if (L.still_t !== L.t || !L.still) {
+    const t = L.t;
+    L.busy = 'still'; labMediaRender();
+    const r = await act(() => api(`${P()}/lab_still`, { shot_id: sid, t }));
+    if (L.shot === sid) { L.still = r ? r.url : ''; L.still_t = t; L.busy = ''; labMediaRender(); }
+  }
+}
+function labAspect() { const o = (S.lab && S.lab.out) || [1920, 1080]; return o[0] / o[1]; }
+function labFaceBox(f, imgAR) {
+  // 让脸大约占画面高度的 38%，眼睛在上三分之一附近
+  const h = Math.min(1, f.h / 0.38), w = (h * labAspect()) / imgAR;
+  return cropFix({ x: f.x + f.w / 2 - w / 2, y: f.y + f.h * 0.45 - h * 0.4, w, h }, imgAR);
+}
+function labShotCard(s) {
+  if (!s) return `<button type="button" class="lab-pick empty" data-act="lab-choose">${tr('选择一个镜头')}</button>`;
+  return `<div class="lab-pick">${s.thumb ? `<img src="${esc(s.thumb)}" alt="">` : ''}
+    <div style="min-width:0"><div class="mono muted" style="font-size:11px">${esc(s.id)} · ${tr('{0} 秒', (+s.duration).toFixed(1))}${s.fps ? ` · ${Math.round(s.fps)}fps` : ''}</div>
+      <div class="t">${esc(s.summary || s.file || s.id)}</div></div>
+    <button type="button" class="ghost sm" data-act="lab-choose">${tr('换一个')}</button></div>`;
+}
+function labRangeHtml(s) {
+  const L = labState();
+  return `<div class="set-grid" style="gap:12px;grid-template-columns:repeat(2,minmax(0,1fr))">
+    <label class="section"><span class="label">${tr('从（秒）')}</span><input id="lbA" class="field mono" type="number" step="0.1" min="0" max="${s.duration}" value="${L.a}"></label>
+    <label class="section"><span class="label">${tr('到（秒）')}</span><input id="lbB" class="field mono" type="number" step="0.1" min="0" max="${s.duration}" value="${L.b}"></label></div>`;
+}
+function labInsertHtml() {
+  const L = labState(), tl = (S.story && S.story.timeline) || [];
+  if (!tl.length) return `<p class="note">${tr('还没有时间线。做好的片段先留在右边，剪出时间线后再放进去。')}</p>`;
+  return `<label class="section"><span class="label">${tr('做好以后')}</span>
+    <select id="lbInsert" class="field">
+      <option value="none" ${L.insert === 'none' ? 'selected' : ''}>${tr('先不放进时间线')}</option>
+      <option value="end" ${L.insert === 'end' ? 'selected' : ''}>${tr('放到时间线最后')}</option>
+      ${tl.map((t, i) => `<option value="${i + 1}" ${L.insert === String(i + 1) ? 'selected' : ''}>${esc(tr('放在 #{0} 后面：{1}', i + 1, ((S.byId[t.shot_id] || {}).summary || t.shot_id).slice(0, 24)))}</option>`).join('')}
+    </select></label>`;
+}
+function labFormHtml() {
+  const L = labState(), s = S.byId[L.shot], lb = S.lab || {};
+  if (!s) return `<p class="note">${tr('先选一个镜头：补镜头用它的一帧当参考；慢动作和裁切在它上面做。')}</p>`;
+  if (L.tool === 'fill') {
+    const mock = lb.provider === 'mock', price = +lb.price_per_sec || 0;
+    return `<label class="section"><span class="label">${tr('要补什么')}</span>
+        <select id="lbGap" class="field"><option value="">${tr('自己写…')}</option>
+          ${(lb.gaps || []).map((g) => `<option value="${esc(g)}" ${L.gap === g ? 'selected' : ''}>${esc(g.slice(0, 40))}</option>`).join('')}</select></label>
+      <textarea id="lbNote" class="field" rows="2" placeholder="${tr('比如：开场缺一个从高处看海边小镇的远景')}">${esc(L.note || L.gap)}</textarea>
+      <div class="toolbar" style="justify-content:space-between"><span class="label">${tr('给视频模型的提示词')}</span>
+        <button type="button" class="ghost sm" data-act="lab-prompt" ${L.busy === 'prompt' ? 'disabled' : ''}>${L.busy === 'prompt' ? tr('正在写…') : tr('让 AI 写')}</button></div>
+      <textarea id="lbPrompt" class="field mono" rows="5" style="font-size:12.5px" placeholder="${tr('英文效果最好。描述画面里有什么、怎么动、镜头怎么走。')}">${esc(L.prompt)}</textarea>
+      <div class="section"><div class="label">${tr('时长')}</div>${labSeg('seconds', [[5, '5 秒'], [10, '10 秒']])}</div>
+      <p class="note" style="color:${mock ? 'var(--accent)' : 'var(--text2)'}">${mock
+        ? tr('现在是离线模拟：用参考帧做一个慢推，不花钱，只用来测流程。要真的生成，到设置页“镜头工坊”选视频生成服务。')
+        : tr('预计花费约 ${0}（{1} 秒 × ${2}/秒，以服务商账单为准）。生成一般要 1–5 分钟。', (price * L.seconds).toFixed(2), L.seconds, price)}</p>`;
+  }
+  if (L.tool === 'slowmo') {
+    const fps = +s.fps || 30, out = (+(S.cfg && S.cfg.settings ? S.cfg.settings.render_fps : 30)) || 30;
+    const native = fps >= (out / L.speed) * 0.9;
+    return `${labRangeHtml(s)}
+      <div class="section"><div class="label">${tr('放慢到')}</div>${labSeg('speed', [[0.5, '½ 速'], [0.33, '⅓ 速'], [0.25, '¼ 速']])}</div>
+      <div class="section"><div class="label">${tr('补帧方式')}</div>${labSeg('method', [['auto', '自动'], ['flow', '光流补帧'], ['blend', '帧混合']])}</div>
+      <p class="note">${native ? tr('原片是 {0}fps，直接放慢就够顺，不用补帧。', Math.round(fps))
+        : tr('原片是 {0}fps，要补帧。光流补帧更顺但慢一些；帧混合快，但动作快时会有重影。', Math.round(fps))}
+        <span id="lbDur">${tr('做出来约 {0} 秒，不带原声。', ((L.b - L.a) / L.speed).toFixed(1))}</span></p>`;
+  }
+  return cropFormHtml(s);
+}
+function labSeg(key, opts) {
+  const L = labState();
+  return `<div class="seg" role="group" style="grid-template-columns:repeat(${opts.length},minmax(0,1fr))">${opts.map(([v, l]) =>
+    `<button type="button" data-lbset="${key}" data-val="${v}" aria-pressed="${String(L[key]) === String(v)}">${tr(l)}</button>`).join('')}</div>`;
+}
+function labMediaHtml() {
+  const L = labState(), s = S.byId[L.shot];
+  if (!s) return `<div class="empty"><h2>${tr('镜头工坊')}</h2><p style="margin:0;max-width:480px;line-height:1.7">${tr('在已有素材的基础上做新片段：补一个素材里没有的镜头、把一段动作放慢、或者从画面里裁出一个特写。做好的片段可以直接放进时间线。')}</p>
+    <button type="button" class="btn" data-act="lab-choose">${tr('选择一个镜头')}</button></div>`;
+  if (L.tool === 'crop') return cropStageHtml(s);
+  if (L.tool === 'slowmo') {
+    if (!L.preview) return `<div class="lab-stage"><p class="muted">${L.busy === 'preview' ? tr('正在准备预览…（第一次打开一个镜头要几秒）') : tr('预览没准备好')}</p></div>`;
+    return `<div class="lab-stage"><video id="lbVideo" src="${esc(L.preview)}" controls playsinline preload="metadata"></video></div>
+      <div class="toolbar" style="justify-content:center"><button type="button" class="ghost sm" data-act="lab-set-a">${tr('当前位置设为“从”')}</button>
+        <button type="button" class="ghost sm" data-act="lab-set-b">${tr('当前位置设为“到”')}</button>
+        <button type="button" class="ghost sm" data-act="lab-play-range">${tr('播放选中的这段')}</button></div>`;
+  }
+  const img = s.size && s.size[0] ? s.size : [16, 9];
+  return `<div class="lab-stage"><div class="lab-frame" style="--ar:${img[0] / img[1]}">
+      ${L.still ? `<img src="${esc(L.still)}" alt="" draggable="false">` : `<span class="muted">${L.busy === 'still' ? tr('正在取这一帧…') : ''}</span>`}
+    </div></div>
+    <div class="lab-scrub"><span class="mono">${tr('取哪一帧')}</span><input id="lbT" type="range" min="0" max="${s.duration}" step="0.1" value="${L.t}"><span class="mono" id="lbTVal">${(+L.t).toFixed(1)}s</span></div>`;
+}
+function labMediaRender() { const el = $('#lbMedia'); if (el) { el.innerHTML = labMediaHtml(); cropMount(); } }
+/** 自动起的名字按界面语言显示；你自己写的（或补镜头时写的缺口）原样显示 */
+function labLabel(a) {
+  if (!a.auto_label) return a.label;
+  const pr = a.params || {};
+  const what = a.kind === 'slowmo' ? `×${pr.speed}` : a.kind === 'crop' ? tr({ fixed: '固定', push: '推拉', track: '跟随人脸', static: '固定', push_in: '推拉', pull_out: '推拉' }[pr.mode || pr.motion] || '') : '';
+  return `${tr(LAB_KIND[a.kind] || a.kind)}${what ? ' ' + what : ''} · ${a.src_shot || ''}`;
+}
+function labAssetHtml(a) {
+  return `<div class="lab-asset">
+    <video src="${esc(a.url)}" poster="${esc(a.thumb_url || '')}" controls preload="none" playsinline></video>
+    <div class="toolbar" style="gap:6px;align-items:baseline"><span class="tag-k ${esc(a.kind)}">${tr(LAB_KIND[a.kind] || a.kind)}</span>
+      <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(labLabel(a))}">${esc(labLabel(a))}</b>
+      <span class="mono muted" style="font-size:12px">${(+a.duration).toFixed(1)}s</span></div>
+    <div class="toolbar" style="gap:6px">
+      ${a.in_timeline ? `<span class="note ok-text">${tr('✓ 已在时间线里')}</span>` : S.lab && S.lab.has_story ? `<button type="button" class="ghost sm" data-labins="${esc(a.id)}">${tr('放到时间线最后')}</button>` : ''}
+      ${a.kind === 'fill' && a.params && a.params.provider === 'mock' ? `<span class="note">${tr('离线模拟')}</span>` : ''}
+      <button type="button" class="ghost sm danger" style="margin-left:auto" data-labdel="${esc(a.id)}" ${a.in_timeline ? 'disabled title="' + esc(tr('先在时间线里删掉它')) + '"' : ''}>${tr('删除')}</button></div></div>`;
+}
+function viewLab() {
+  const L = labState(), lb = S.lab;
+  if (!lb) { setTimeout(async () => { await loadLab(); if (S.page === 'lab') render(); }, 0); return `<div class="page"><div class="content"><p class="muted">${tr('正在读取…')}</p></div></div>`; }
+  if (lb.error) return `<div class="page"><div class="content"><div class="empty"><h2>${tr('打不开镜头工坊')}</h2><p class="err" style="margin:0">${esc(lb.error)}</p></div></div></div>`;
+  const s = S.byId[L.shot];
+  const label = { fill: tr('生成补镜头'), slowmo: tr('做慢动作'), crop: tr('裁切') }[L.tool];
+  return `<div class="page">
+    <aside class="side wide">
+      <div><h1 style="font-size:24px;margin-bottom:6px">${tr('镜头工坊')}</h1>
+        <p class="muted" style="margin:0;line-height:1.6">${tr('补镜头、慢动作、裁切特写。原片不会被改动，做出来的都是新片段。')}</p></div>
+      <div class="seg" role="tablist" style="grid-template-columns:repeat(3,minmax(0,1fr))">${LAB_TOOLS.map(([v, l]) =>
+        `<button type="button" role="tab" data-labtool="${v}" aria-selected="${L.tool === v}" aria-pressed="${L.tool === v}">${tr(l)}</button>`).join('')}</div>
+      <div class="section"><div class="label">${L.tool === 'fill' ? tr('参考镜头') : tr('在哪个镜头上做')}</div>${labShotCard(s)}</div>
+      <div class="section" id="lbForm" style="gap:12px">${labFormHtml()}</div>
+      ${s ? labInsertHtml() : ''}
+      ${s ? `<button type="button" class="btn" style="min-height:48px;font-size:15px" data-act="lab-make" ${dis()}>${label}</button>` : ''}
+    </aside>
+    <div class="content" id="lbMedia">${labMediaHtml()}</div>
+    <aside class="detail">
+      <div class="toolbar" style="justify-content:space-between"><h2 style="font-size:18px">${tr('做好的片段')}</h2><span class="muted mono" style="font-size:12px">${lb.assets.length}</span></div>
+      ${lb.assets.length ? lb.assets.map(labAssetHtml).join('') : `<p class="muted" style="margin:0">${tr('还没有。左边选好以后点按钮，做好的片段会出现在这里。')}</p>`}
+      <p class="help" style="margin-top:auto">${tr('片段存在项目文件夹的 lab/ 里。在时间线、预览渲染和导出的 XML 里都当普通镜头用。')}</p>
+    </aside>
+  </div>`;
+}
+/** 选镜头的小窗口：缩略图 + 搜索 */
+function pickShot(current) {
+  const list = S.shots.filter((s) => s.frames && s.frames.length);
+  const grid = (q) => list.filter((s) => !q || `${s.id} ${s.summary} ${s.file} ${(s.tags || []).join(' ')}`.toLowerCase().includes(q))
+    .map((s) => `<button type="button" class="pick-item ${s.id === current ? 'sel' : ''}" data-pick="${esc(s.id)}">
+      <img src="${esc(s.thumb)}" alt="" loading="lazy"><span>${esc((s.summary || s.file || s.id).slice(0, 40))}</span>
+      <small class="mono">${esc(s.id)} · ${(+s.duration).toFixed(1)}s</small></button>`).join('') || `<p class="muted">${tr('没有符合的镜头')}</p>`;
+  return modal(`<h2>${tr('选择一个镜头')}</h2>
+    <input id="pkQ" class="field" type="search" placeholder="${tr('搜索：灯塔、日落、镜头 id…')}" autocomplete="off">
+    <div class="pick-grid" id="pkGrid">${grid('')}</div>
+    <div class="row-end"><button class="ghost" value="">${tr('取消')}</button></div>`, (b, close) => {
+    $('#pkQ', b).addEventListener('input', (e) => { $('#pkGrid', b).innerHTML = grid(e.target.value.trim().toLowerCase()); });
+    b.addEventListener('click', (e) => { const it = e.target.closest('[data-pick]'); if (it) close(it.dataset.pick); });
+    setTimeout(() => $('#pkQ', b).focus(), 30);
+  });
+}
+async function labMake() {
+  const L = labState(), s = S.byId[L.shot]; if (!s) return;
+  const body = { kind: L.tool, shot_id: L.shot, mock: mockOn() };
+  const tl = (S.story && S.story.timeline) || [];
+  if (tl.length && L.insert !== 'none') body.insert_at = L.insert === 'end' ? tl.length : +L.insert;
+  if (L.tool === 'fill') {
+    if (!L.prompt.trim()) { toast(tr('先写提示词，或者点“让 AI 写”'), true); return; }
+    Object.assign(body, { t: L.t, prompt: L.prompt.trim(), seconds: L.seconds, gap: (L.note || L.gap || '').trim() });
+    const lb = S.lab || {};
+    if (lb.provider !== 'mock' && !mockOn()) {
+      if (!lb.fal_key || !lb.fal_key.has_key) { toast(tr('还没有填视频生成服务的 Key，到设置页“镜头工坊”填写'), true); return; }
+      const cost = ((+lb.price_per_sec || 0) * L.seconds).toFixed(2);
+      if (!(await confirmBox(tr('开始生成？'), tr('会调用 {0}，生成 {1} 秒，预计花费约 ${2}（以服务商账单为准）。', lb.model, L.seconds, cost), tr('生成')))) return;
+    }
+  } else {
+    if (!(L.b - L.a >= 0.3)) { toast(tr('“到”要比“从”晚至少 0.3 秒'), true); return; }
+    Object.assign(body, { in: L.a, out: L.b });
+    if (L.tool === 'slowmo') Object.assign(body, { speed: L.speed, method: L.method });
+    else {
+      const C = L.cr;
+      if (C.mode === 'track' && !C.tracked) { toast(tr('先点“开始跟随”，看一下效果再裁切'), true); return; }
+      cropEnsure();
+      body.keys = (C.keys || []).map((k) => ({ t: k.t, x: k.x, y: k.y, w: k.w, h: k.h }));
+    }
+  }
+  startJob(`${P()}/lab_make`, body);
+}
+
+
+/* ---- 裁切特写：在预览视频上框选，三种方式——固定 / 推拉（起点框 → 终点框）/ 跟随人脸 */
+const CROP_MODES = [['fixed', '固定'], ['push', '推拉'], ['track', '跟随人脸']];
+function cropImgAR() {
+  const L = labState(), s = S.byId[L.shot], v = $('#lbVideo');
+  if (v && v.videoWidth) return v.videoWidth / v.videoHeight;
+  return s && s.size && s.size[0] ? s.size[0] / s.size[1] : 16 / 9;
+}
+/** 画面里能放下的最大输出比例区域（0-1） */
+function cropFull(imgAR, cx = 0.5, cy = 0.5) {
+  const ar = labAspect();
+  let w = 1, h = imgAR / ar;
+  if (h > 1) { h = 1; w = ar / imgAR; }
+  return { x: Math.min(Math.max(0, cx - w / 2), 1 - w), y: Math.min(Math.max(0, cy - h / 2), 1 - h), w, h };
+}
+/** 修正成输出宽高比、不超出画面；以框中心为准 */
+function cropFix(b, imgAR) {
+  const full = cropFull(imgAR), ar = labAspect();
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  let w = Math.min(Math.max(0.04, b.w), full.w), h = (w * imgAR) / ar;
+  if (h > full.h) { h = full.h; w = (h * ar) / imgAR; }
+  return { x: Math.min(Math.max(0, cx - w / 2), 1 - w), y: Math.min(Math.max(0, cy - h / 2), 1 - h), w, h };
+}
+function cropBoxAt(keys, t) {
+  if (!keys || !keys.length) return null;
+  if (t <= keys[0].t) return keys[0];
+  if (t >= keys[keys.length - 1].t) return keys[keys.length - 1];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const k0 = keys[i], k1 = keys[i + 1];
+    if (t >= k0.t && t <= k1.t) {
+      let p = (t - k0.t) / Math.max(1e-6, k1.t - k0.t);
+      if (keys.length === 2) p = p * p * (3 - 2 * p);
+      return { t, x: k0.x + (k1.x - k0.x) * p, y: k0.y + (k1.y - k0.y) * p, w: k0.w + (k1.w - k0.w) * p, h: k0.h + (k1.h - k0.h) * p };
+    }
+  }
+  return keys[keys.length - 1];
+}
+/** 保证当前模式有合适的关键帧（切换模式、改了起止时间时调用） */
+function cropEnsure() {
+  const L = labState(), C = L.cr, ar = cropImgAR();
+  const mid = cropFix({ x: 0.3, y: 0.25, w: 0.4, h: 0.4 }, ar);
+  const cur = (C.keys && C.keys.length && C.mode !== 'track') ? C.keys[C.keys.length - 1] : null;
+  if (C.mode === 'fixed') C.keys = [{ t: L.a, ...(cur ? cropFix(cur, ar) : mid) }];
+  else if (C.mode === 'push') {
+    if (!C.keys || C.keys.length !== 2 || C.tracked) {
+      const end = cur ? cropFix(cur, ar) : mid;
+      C.keys = [{ t: L.a, ...cropFull(ar, end.x + end.w / 2, end.y + end.h / 2) }, { t: L.b, ...end }];
+    }
+    C.keys[0].t = L.a; C.keys[1].t = L.b;
+  } else if (!C.tracked) {
+    C.seed = C.seed || (cur ? cropFix(cur, ar) : mid);
+    C.keys = null;
+  }
+}
+/** 现在可以拖的那个框：固定 → 唯一的框；推拉 → 正在编辑的起点或终点；跟随 → 还没跟随前用来选脸的框 */
+function cropEditable() {
+  const C = labState().cr;
+  if (C.mode === 'fixed') return C.keys && C.keys[0];
+  if (C.mode === 'push') return C.keys && C.keys[C.edit];
+  return C.tracked ? null : C.seed;
+}
+function cropSetEditable(box, raw) {
+  const C = labState().cr, b = raw ? box : cropFix(box, cropImgAR());
+  if (C.mode === 'track') { C.seed = b; C.tracked = null; C.keys = null; return; }
+  const k = cropEditable(); if (k) Object.assign(k, b);
+}
+/** 视频当前时刻应该显示的框 */
+function cropShownBox() {
+  const L = labState(), C = L.cr, v = $('#lbVideo');
+  const t = v ? L.a + Math.max(0, v.currentTime - L.a) : L.a;
+  const playing = v && !v.paused;
+  if (C.mode === 'track') return C.tracked ? cropBoxAt(C.keys, v ? v.currentTime : L.a) : C.seed;
+  if (C.mode === 'push' && playing) return cropBoxAt(C.keys, t);
+  return cropEditable();
+}
+function cropFormHtml(s) {
+  const L = labState(), C = L.cr;
+  const minW = C.mode === 'track' ? (C.keys ? Math.min(...C.keys.map((k) => k.w)) : 1) : Math.min(...((C.keys || []).map((k) => k.w).concat([1])));
+  const px = Math.round(minW * ((s.size && s.size[0]) || 1920)), need = labAspect() > 1 ? 1920 : 1080;
+  let body = '';
+  if (C.mode === 'fixed') body = `<p class="note">${tr('拖动画面上的框选位置，拖右下角的圆点改大小。宽高比按成片画幅锁定。')}</p>`;
+  else if (C.mode === 'push') body = `<div class="seg" role="group" style="grid-template-columns:1fr 1fr">
+      <button type="button" data-cropedit="0" aria-pressed="${C.edit === 0}">${tr('起点框')}<span class="sub">${(+L.a).toFixed(1)}s</span></button>
+      <button type="button" data-cropedit="1" aria-pressed="${C.edit === 1}">${tr('终点框')}<span class="sub">${(+L.b).toFixed(1)}s</span></button></div>
+    <div class="toolbar" style="gap:6px">
+      <button type="button" class="ghost sm" data-croppreset="in">${tr('全景 → 特写')}</button>
+      <button type="button" class="ghost sm" data-croppreset="out">${tr('特写 → 全景')}</button>
+      <button type="button" class="ghost sm" data-croppreset="same">${tr('终点 = 起点')}</button></div>
+    <p class="note">${tr('点“起点框 / 终点框”切换要调的框，画面会跳到那一刻。按播放看推拉效果。')}</p>`;
+  else body = `<div class="set-row" style="gap:6px"><div class="lbl" style="display:flex;justify-content:space-between"><span>${tr('脸占画面高度')}</span><span class="mono" id="cropTightVal" style="color:var(--accent)">${Math.round(C.tight * 100)}%</span></div>
+      <input id="cropTight" type="range" min="0.2" max="0.6" step="0.02" value="${C.tight}" style="accent-color:var(--accent)"></div>
+    <button type="button" class="ghost outline" data-act="crop-track" ${L.busy === 'track' ? 'disabled' : ''}>${L.busy === 'track' ? tr('正在跟随…') : C.tracked ? tr('重新跟随') : tr('开始跟随')}</button>
+    <p class="note">${C.tracked ? tr('{0} 帧里跟上了 {1} 帧。按播放看效果；不满意就把框拖到那张脸上再点“重新跟随”。', C.tracked.samples, C.tracked.found)
+      : tr('画面里有几个人时，先把框拖到要跟的那张脸上（可以先点“自动找脸”），再点“开始跟随”。')}</p>`;
+  return `${labRangeHtml(s)}
+    <div class="section"><div class="label">${tr('方式')}</div><div class="seg" role="group" style="grid-template-columns:repeat(3,minmax(0,1fr))">${CROP_MODES.map(([v, l]) =>
+      `<button type="button" data-cropmode="${v}" aria-pressed="${C.mode === v}">${tr(l)}</button>`).join('')}</div></div>
+    ${body}
+    ${C.mode !== 'track' || !C.tracked ? `<div class="toolbar"><button type="button" class="ghost sm" data-act="lab-faces" ${L.busy === 'faces' ? 'disabled' : ''}>${L.busy === 'faces' ? tr('正在找…') : tr('自动找脸')}</button>
+      <span class="note">${L.faces == null ? '' : L.faces.length ? tr('找到 {0} 张脸，点一下虚线框就用它。', L.faces.length) : tr('没找到清楚的正脸，手动框一下。')}</span></div>` : ''}
+    ${px < need * 0.35 ? `<p class="note" style="color:var(--accent)">${tr('框出来的区域只有约 {0} 像素宽，放大后会比较糊。', px)}</p>` : ''}`;
+}
+function cropStageHtml(s) {
+  const L = labState();
+  if (!L.preview) return `<div class="lab-stage"><p class="muted">${L.busy === 'preview' ? tr('正在准备预览…（第一次打开一个镜头要几秒）') : tr('预览没准备好')}</p></div>`;
+  const ar = s.size && s.size[0] ? s.size[0] / s.size[1] : 16 / 9, oar = labAspect();
+  return `<div class="lab-stage crop">
+      <div class="cropstage" style="--ar:${ar}">
+        <video id="lbVideo" src="${esc(L.preview)}" muted playsinline preload="auto"></video>
+        <div class="cropshade" id="cropLayer">
+          ${(L.faces || []).map((f, i) => `<button type="button" class="lab-face" data-face="${i}" title="${tr('用这张脸')}" style="left:${f.x * 100}%;top:${f.y * 100}%;width:${f.w * 100}%;height:${f.h * 100}%"></button>`).join('')}
+          <div class="lab-box" id="lbBox"><span class="lab-box-tag" id="cropTag"></span><i class="lab-handle" data-handle="1"></i></div>
+        </div>
+      </div>
+    </div>
+    <div class="crop-transport">
+      <button type="button" class="ghost sm" data-act="crop-play" id="cropPlay" aria-label="${tr('播放')}">▶</button>
+      <input id="cropTime" type="range" min="${L.a}" max="${L.b}" step="0.01" value="${L.a}">
+      <span class="mono" id="cropTimeVal">${(+L.a).toFixed(2)}s</span>
+    </div>
+    <div class="crop-result"><div class="label">${tr('成片效果')}</div>
+      <canvas id="cropCanvas" width="${oar >= 1 ? 480 : 270}" height="${oar >= 1 ? Math.round(480 / oar) : 480}"></canvas></div>`;
+}
+let cropRAF = 0;
+function cropDraw() {
+  const L = labState(), C = L.cr, v = $('#lbVideo'), el = $('#lbBox'); if (!v || !el) return;
+  const b = cropShownBox();
+  const tag = $('#cropTag');
+  if (b) {
+    Object.assign(el.style, { display: '', left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` });
+    const locked = !cropEditable() || (C.mode === 'push' && !v.paused);
+    el.classList.toggle('locked', locked);
+    if (tag) tag.textContent = C.mode === 'push' ? (v.paused ? tr(C.edit ? '终点框' : '起点框') : '') : C.mode === 'track' && C.tracked ? tr('跟随中') : '';
+  } else el.style.display = 'none';
+  const tv = $('#cropTime'), tl = $('#cropTimeVal');
+  if (tv && document.activeElement !== tv) tv.value = v.currentTime;
+  if (tl) tl.textContent = `${v.currentTime.toFixed(2)}s`;
+  const play = $('#cropPlay'); if (play) play.textContent = v.paused ? '▶' : '❚❚';
+  const cv = $('#cropCanvas');
+  if (cv && b && v.videoWidth) {
+    const g = cv.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    try { g.drawImage(v, b.x * v.videoWidth, b.y * v.videoHeight, b.w * v.videoWidth, b.h * v.videoHeight, 0, 0, cv.width, cv.height); } catch (e) { /* 还没解码出画面 */ }
+  }
+}
+function cropLoop() { cancelAnimationFrame(cropRAF); const v = $('#lbVideo'); cropDraw(); if (v && !v.paused) cropRAF = requestAnimationFrame(cropLoop); }
+/** 视频元素插进页面后挂上事件 */
+function cropMount() {
+  const L = labState(), v = $('#lbVideo');
+  if (!v || L.tool !== 'crop' || v.dataset.mounted) return;
+  v.dataset.mounted = '1';
+  const seekTo = (t) => { try { v.currentTime = Math.min(Math.max(L.a, t), L.b); } catch (e) { /* 还没加载 */ } };
+  v.addEventListener('loadedmetadata', () => { cropEnsure(); seekTo(L.cr.mode === 'push' && L.cr.edit === 1 ? L.b : L.a); const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml(); });
+  v.addEventListener('seeked', cropDraw);
+  v.addEventListener('loadeddata', cropDraw);
+  v.addEventListener('play', cropLoop);
+  v.addEventListener('pause', cropDraw);
+  v.addEventListener('timeupdate', () => { if (v.currentTime >= L.b - 0.02) { v.pause(); } });
+  if (v.readyState >= 1) { cropEnsure(); seekTo(L.a); }
+}
+async function cropTrack() {
+  const L = labState(), C = L.cr;
+  L.busy = 'track'; $('#lbForm').innerHTML = labFormHtml();
+  const v = $('#lbVideo');
+  const r = await act(() => api(`${P()}/lab_track`, { shot_id: L.shot, in: L.a, out: L.b, seed: C.seed, seed_t: v ? v.currentTime : L.a, tight: C.tight, mock: mockOn() }));
+  L.busy = '';
+  if (r) { C.keys = r.keys; C.tracked = { samples: r.samples, found: r.found, method: r.method }; L.faces = null; document.querySelectorAll('.lab-face').forEach((x) => x.remove()); }
+  const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml();
+  cropDraw();
+}
+/* 拖动 / 缩放框（只在框可编辑时） */
+let cropDrag = null;
+document.addEventListener('pointerdown', (e) => {
+  const box = e.target.closest && e.target.closest('#lbBox'); if (!box || box.classList.contains('locked')) return;
+  const b = cropEditable(); if (!b) return;
+  const fr = $('#cropLayer').getBoundingClientRect();
+  cropDrag = { resize: !!e.target.dataset.handle, x0: e.clientX, y0: e.clientY, b0: { x: b.x, y: b.y, w: b.w, h: b.h }, fr };
+  box.setPointerCapture(e.pointerId); e.preventDefault();
+});
+document.addEventListener('pointermove', (e) => {
+  if (!cropDrag) return;
+  const dx = (e.clientX - cropDrag.x0) / cropDrag.fr.width, dy = (e.clientY - cropDrag.y0) / cropDrag.fr.height, b = cropDrag.b0;
+  if (cropDrag.resize) {                     // 以左上角为锚点改大小，宽高比锁定
+    const ar = cropImgAR(), oar = labAspect();
+    let w = Math.max(0.04, b.w + dx);
+    w = Math.min(w, 1 - b.x, ((1 - b.y) * oar) / ar);
+    cropSetEditable({ x: b.x, y: b.y, w, h: (w * ar) / oar }, true);
+  } else cropSetEditable({ ...b, x: b.x + dx, y: b.y + dy });
+  cropDraw();
+});
+document.addEventListener('pointerup', () => { if (cropDrag) { cropDrag = null; const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml(); } });
+document.addEventListener('click', (e) => {
+  const t = e.target.closest && e.target.closest('[data-cropmode],[data-cropedit],[data-croppreset]'); if (!t) return;
+  const L = labState(), C = L.cr, v = $('#lbVideo'), ar = cropImgAR();
+  if (t.dataset.cropmode) { if (C.mode !== t.dataset.cropmode) { C.mode = t.dataset.cropmode; if (C.mode !== 'track') C.tracked = null; cropEnsure(); } if (v) { v.pause(); v.currentTime = L.a; } }
+  if (t.dataset.cropedit) { C.edit = +t.dataset.cropedit; if (v) { v.pause(); v.currentTime = C.edit ? Math.max(L.a, L.b - 0.03) : L.a; } }
+  if (t.dataset.croppreset && C.keys && C.keys.length === 2) {
+    const [k0, k1] = C.keys, p = t.dataset.croppreset;
+    const tight = C.edit === 0 ? k0 : k1, isFull = (k) => k.w >= cropFull(ar).w - 0.001;
+    const close = isFull(tight) ? (isFull(k0) ? k1 : k0) : tight;
+    const full = cropFull(ar, close.x + close.w / 2, close.y + close.h / 2);
+    if (p === 'in') { Object.assign(k0, full); Object.assign(k1, cropFix(close, ar)); }
+    if (p === 'out') { Object.assign(k0, cropFix(close, ar)); Object.assign(k1, full); }
+    if (p === 'same') Object.assign(k1, { x: k0.x, y: k0.y, w: k0.w, h: k0.h });
+  }
+  const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml();
+  cropDraw();
+});
+document.addEventListener('input', (e) => {
+  const t = e.target;
+  if (t.id === 'cropTime') { const v = $('#lbVideo'); if (v) { v.pause(); v.currentTime = +t.value; } return; }
+  if (t.id === 'cropTight') { const C = labState().cr; C.tight = +t.value; const el = $('#cropTightVal'); if (el) el.textContent = `${Math.round(C.tight * 100)}%`; }
+});
+
 /* ---------------------------------------------------------------- 1 素材 */
 function shotDays() {
   const days = {};
@@ -586,7 +1014,11 @@ function detailHtml() {
       <button type="button" class="ghost ${s.must ? 'outline' : ''}" style="flex:1" data-flag="must" aria-pressed="${s.must}">${s.must ? tr('✓ 必用') : tr('标为必用')}</button>
       <button type="button" class="ghost ${s.excluded ? 'danger' : ''}" style="flex:1" data-flag="exclude" aria-pressed="${s.excluded}">${s.excluded ? tr('已排除（点击恢复）') : tr('排除这个镜头')}</button>
     </div>
-    ${(s.protected && !s.must) || s.unprotected ? `<button type="button" class="ghost sm" data-flag="unprotect" aria-pressed="${!!s.unprotected}">${s.unprotected ? tr('恢复自动保护') : tr('不保护这个镜头')}</button>` : ''}`;
+    ${(s.protected && !s.must) || s.unprotected ? `<button type="button" class="ghost sm" data-flag="unprotect" aria-pressed="${!!s.unprotected}">${s.unprotected ? tr('恢复自动保护') : tr('不保护这个镜头')}</button>` : ''}
+    <div class="toolbar" style="gap:6px"><span class="label" style="margin-right:4px">${tr('镜头工坊')}</span>
+      <button type="button" class="ghost sm" data-labgo="slowmo" data-shot-id="${esc(s.id)}">${tr('慢动作')}</button>
+      <button type="button" class="ghost sm" data-labgo="crop" data-shot-id="${esc(s.id)}">${tr('裁切特写')}</button>
+      <button type="button" class="ghost sm" data-labgo="fill" data-shot-id="${esc(s.id)}">${tr('用它补镜头')}</button></div>`;
 }
 function protectText(s) {
   if (s.excluded) return esc(tr('已排除，AI 不会用'));
@@ -732,7 +1164,7 @@ function viewStory() {
     <aside class="detail">
       <div><h2 style="font-size:18px">${tr('素材撑不起的部分')}</h2>
         <p class="muted" style="margin:6px 0 0;line-height:1.6">${tr('AI 对照了你写的内容和实际拍到的东西，这些地方需要你决定。')}</p></div>
-      ${missing.length ? missing.map((m) => `<div class="gap">${esc(m)}</div>`).join('') : `<p class="muted" style="margin:0">${ol ? tr('没有发现明显的缺口。') : tr('生成故事线后显示。')}</p>`}
+      ${missing.length ? missing.map((m) => `<div class="gap">${esc(m)}<div style="margin-top:6px"><button type="button" class="ghost sm" data-labgap="${esc(m)}">${tr('去镜头工坊补一个')}</button></div></div>`).join('') : `<p class="muted" style="margin:0">${ol ? tr('没有发现明显的缺口。') : tr('生成故事线后显示。')}</p>`}
       ${ol && ol.notes ? `<div class="gap" style="background:var(--card);border-color:var(--line)"><b style="color:var(--text)">${tr('剪辑建议')}</b>${esc(ol.notes)}</div>` : ''}
       ${protectSummaryHtml()}
       ${S.p.flags && (S.p.flags.must || S.p.flags.exclude) ? `<p class="note">${tr('已标记：{0} 个必用镜头，{1} 个排除镜头（排除的 AI 不会用）。', S.p.flags.must, S.p.flags.exclude)}</p>` : ''}
@@ -846,7 +1278,9 @@ function renderEditor() {
     <div class="toolbar" style="gap:6px">
       <button type="button" class="ghost sm" data-move="-1" ${S.tsel === 0 ? 'disabled' : ''}>${tr('← 前移')}</button>
       <button type="button" class="ghost sm" data-move="1" ${S.tsel === S.tl.length - 1 ? 'disabled' : ''}>${tr('后移 →')}</button>
-      <button type="button" class="ghost sm danger" data-act="del-clip">${tr('删除镜头')}</button></div>`;
+      <button type="button" class="ghost sm danger" data-act="del-clip">${tr('删除镜头')}</button>
+      ${s.lab ? '' : `<button type="button" class="ghost sm" data-labgo="slowmo" data-from-clip="${S.tsel}">${tr('做慢动作')}</button>
+      <button type="button" class="ghost sm" data-labgo="crop" data-from-clip="${S.tsel}">${tr('裁切特写')}</button>`}</div>`;
 }
 
 function renderSavebar() {
@@ -942,7 +1376,7 @@ async function loadSettings() {
 }
 function cfgChanged() {
   const a = S.cfg.settings, d = S.draft;
-  return Object.keys(d).filter((k) => String(d[k]) !== String(a[k])).length + (S.newKey ? 1 : 0);
+  return Object.keys(d).filter((k) => String(d[k]) !== String(a[k])).length + (S.newKey ? 1 : 0) + (S.newFalKey ? 1 : 0);
 }
 function estimate() {
   const d = S.draft;
@@ -983,7 +1417,7 @@ function navSubs() {
   return { ui: (I18N.LANGS.find(([c]) => c === I18N.lang) || [, ''])[1], api: '', frames: tr('每 {0} 秒', d.frame_every_sec),
     protect: d.protect_enabled ? tr('最多 {0}%', Math.round(d.protect_max_share * 100)) : tr('关'),
     edit: tr('长片 ≥ {0} 分', d.longform_min), whisper: d.whisper ? d.whisper_model : tr('关'),
-    render: `${d.render_hd ? '1080p' : '720p'} · ${d.render_fps}fps`, advanced: '' };
+    render: `${d.render_hd ? '1080p' : '720p'} · ${d.render_fps}fps`, lab: d.lab_provider === 'mock' ? tr('离线模拟') : 'fal.ai', advanced: '' };
 }
 
 function viewSettings() {
@@ -996,7 +1430,7 @@ function viewSettings() {
   }
   const d = S.draft, c = S.cfg, k = c.key || {}, e = estimate();
   const subs = navSubs();
-  const nav = [['ui', '界面'], ['api', 'API Key 与模型'], ['frames', '抽帧与切镜头'], ['protect', '关键画面保护'], ['edit', '剪辑节奏'], ['whisper', '语音转写'], ['render', '预览渲染'], ['advanced', '性能与高级']];
+  const nav = [['ui', '界面'], ['api', 'API Key 与模型'], ['frames', '抽帧与切镜头'], ['protect', '关键画面保护'], ['edit', '剪辑节奏'], ['whisper', '语音转写'], ['render', '预览渲染'], ['lab', '镜头工坊'], ['advanced', '性能与高级']];
   const keyStatus = S.keyTest
     ? (S.keyTest === 'testing' ? `<span class="muted">${tr('正在测试…')}</span>`
       : S.keyTest.ok ? `<span class="ok-text">${tr('✓ 连接成功')}${S.keyTest.models && S.keyTest.models.length ? ' · ' + tr('可用模型 {0} 个', S.keyTest.models.length) : ''}</span>${S.keyTest.missing && S.keyTest.missing.length ? `<br><span class="bad-text">${tr('你选的模型不在可用列表里：')}${esc(S.keyTest.missing.join(tr('、')))}</span>` : ''}`
@@ -1168,6 +1602,30 @@ function viewSettings() {
       </div>
     </section>
 
+    <section class="set-card" id="sec-lab">
+      <div><h2>${tr('镜头工坊')}</h2><p class="lead">${tr('“补镜头”要用视频生成服务（按生成的秒数收费，和 Anthropic 分开结算）。慢动作和裁切在本机做，不花钱。')}</p></div>
+      <div class="set-row"><div class="lbl">${tr('视频生成服务')}</div>
+        <div style="max-width:420px">${seg('lab_provider', [['mock', '离线模拟', '不花钱，测流程'], ['fal', 'fal.ai', '可选 Kling、Veo 等']])}</div></div>
+      ${d.lab_provider === 'fal' ? `<div class="set-row"><label class="lbl" for="cfgFal">fal.ai Key</label>
+          <div class="toolbar"><input id="cfgFal" class="field mono" style="flex:1 1 320px;font-size:13px" type="${S.showKey ? 'text' : 'password'}" autocomplete="off" spellcheck="false"
+            value="${esc(S.newFalKey || '')}" placeholder="${c.fal_key && c.fal_key.has_key ? esc(c.fal_key.hint) + tr('（想换就粘贴新的）') : tr('粘贴 fal.ai 的 Key')}"></div>
+          <div class="help">${c.fal_key && c.fal_key.has_key ? tr('已设置：{0}。', esc(c.fal_key.hint)) : `<span class="bad-text">${tr('还没有填。')}</span>`}
+            ${tr('保存到 .env 的 FAL_KEY。在 {0} 创建。', '<a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener">fal.ai/dashboard/keys</a>')}</div></div>
+        <div class="set-row"><label class="lbl" for="cfgLabModel">${tr('模型')}</label>
+          <input id="cfgLabModel" class="field mono" style="font-size:13px" data-cfg="lab_model" value="${esc(d.lab_model)}">
+          <div class="help">${tr('图片生成视频（image-to-video）的模型名，在 fal.ai 模型页面复制。不同模型价格和效果差别很大。')}</div></div>
+        <div class="set-grid">
+          ${num('lab_price_per_sec', '估算单价', { unit: tr('美元 / 秒'), step: 0.01, help: tr('只用来在生成前提醒大概花多少，填你选的模型在官网上的价格。') })}
+        </div>
+        <details class="more" ${store('cfgMore.lab') ? 'open' : ''} data-more="lab"><summary>${tr('更多参数')}</summary>
+          <div class="set-row"><label class="lbl" for="cfgLabBase">${tr('接口地址')}</label>
+            <input id="cfgLabBase" class="field mono" style="font-size:13px" data-cfg="lab_base_url" value="${esc(d.lab_base_url)}"></div>
+          <div class="set-row"><label class="lbl" for="cfgLabExtra">${tr('额外参数（JSON）')}</label>
+            <input id="cfgLabExtra" class="field mono" style="font-size:13px" data-cfg="lab_extra" value="${esc(d.lab_extra)}" placeholder='{"negative_prompt": "blur, distort"}'>
+            <div class="help">${tr('会原样加进请求里，用来传模型特有的参数。')}</div></div>
+        </details>` : ''}
+    </section>
+
     <section class="set-card" id="sec-advanced">
       <div><h2>${tr('性能与高级')}</h2></div>
       <div class="set-grid">
@@ -1239,9 +1697,10 @@ async function saveSettingsPage() {
   }
   const body = { settings: changed };
   if (S.newKey) body.api_key = S.newKey;
+  if (S.newFalKey) body.fal_key = S.newFalKey;
   const r = await act(() => api('/api/settings', body));
   if (!r) return;
-  S.cfg = r; S.draft = { ...r.settings }; S.cfgDirty = false; S.newKey = ''; S.keyTest = null;
+  S.cfg = r; S.draft = { ...r.settings }; S.cfgDirty = false; S.newKey = ''; S.newFalKey = ''; S.keyTest = null; S.lab = null;
   S.env = { ...S.env, ...(await api('/api/env')) };
   S.whisper = !!r.settings.whisper; S.hd = !!r.settings.render_hd;
   render(); toast(tr('设置已保存'));
@@ -1283,7 +1742,8 @@ async function refreshUsage() {
 const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 1 : 2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n || 0));
 function usageTile(label, x) {
   return `<div class="utile"><span>${tr(label)}</span><b title="${(x.in + x.out).toLocaleString()}">${fmtTok(x.in + x.out)}</b>
-    <small>${tr('输入 {0} · 输出 {1}', fmtTok(x.in), fmtTok(x.out))} · ${tr('{0} 次调用', x.calls)}</small></div>`;
+    <small>${tr('输入 {0} · 输出 {1}', fmtTok(x.in), fmtTok(x.out))} · ${tr('{0} 次调用', x.calls)}</small>
+    ${x.video_sec ? `<small class="ok-text">${tr('视频生成 {0} 秒 · 约 ${1}', x.video_sec, (+x.cost).toFixed(2))}</small>` : ''}</div>`;
 }
 function usageTable(title, rows, nameLabel) {
   if (!rows.length) return '';
@@ -1404,7 +1864,7 @@ document.addEventListener('click', async (e) => {
     const r = await act(() => api(`${P()}/flag`, { shot: s.id, flag: d.flag, on }));
     if (r) {
       const sh = await api(`${P()}/shots`).catch(() => null);
-      if (sh) { S.shots = sh.shots; S.byId = Object.fromEntries(S.shots.map((x) => [x.id, x])); }
+      if (sh) setShots(sh.shots);
       else for (const x of S.shots) { x.must = r.flags.must.includes(x.id); x.excluded = r.flags.exclude.includes(x.id); }
       S.p.flags = { must: r.flags.must.length, exclude: r.flags.exclude.length };
       $('#fDetail').innerHTML = detailHtml();
@@ -1435,6 +1895,35 @@ document.addEventListener('click', async (e) => {
   if (d.toggle) { setDraft(d.toggle, !S.draft[d.toggle]); return render(); }
   if (d.cfgdef) { setDraft(d.cfgdef, S.cfg.defaults[d.cfgdef]); return render(); }
   if (d.planday != null) { S.planDay = +d.planday; return render(); }
+  if (d.labtool) { const L = labState(); L.tool = d.labtool; render(); return labLoadMedia(); }
+  if (d.lbset) { const L = labState(); L[d.lbset] = isNaN(+d.val) ? d.val : +d.val; const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml();
+    document.querySelectorAll(`[data-lbset="${d.lbset}"]`).forEach((b) => b.setAttribute('aria-pressed', b.dataset.val === d.val)); return; }
+  if (d.face != null) { const L = labState(); cropSetEditable(labFaceBox(L.faces[+d.face], cropImgAR())); cropDraw(); const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml(); return; }
+  if (d.labgo) {
+    const L = labState();
+    if (d.fromClip != null) {          // 从时间线进来：用这段的入出点，做好以后放在它后面
+      const c = S.tl[+d.fromClip];
+      L.tool = d.labgo; location.hash = '#lab';
+      return labPick(c.shot_id, { a: +c.in, b: +c.out, t: +((+c.in + +c.out) / 2).toFixed(2), insert: +d.fromClip + 1 });
+    }
+    L.tool = d.labgo; location.hash = '#lab';
+    return labPick(d.shotId);
+  }
+  if (d.labgap != null) {
+    const L = labState(); L.tool = 'fill'; L.gap = d.labgap; L.note = d.labgap; L.prompt = '';
+    location.hash = '#lab'; return;
+  }
+  if (d.labins) {
+    const r = await act(() => api(`${P()}/lab_insert`, { id: d.labins }));
+    if (r) { S.lab = r; await loadProject(); S.lab = r; render(); toast(tr('已放到时间线最后，去“时间线”里调整位置')); }
+    return;
+  }
+  if (d.labdel) {
+    if (!(await confirmBox(tr('删除这个片段？'), tr('文件也会一起删掉。'), tr('删除')))) return;
+    const r = await act(() => api(`${P()}/lab_delete`, { id: d.labdel }));
+    if (r) { S.lab = r; render(); }
+    return;
+  }
   if (d.prefadd != null) { const li = t.closest('[data-pday]'); return pickPlanRef(S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx].shot_id); }
   if (d.prefdel != null) {
     const li = t.closest('[data-pday]'); const sh = S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx];
@@ -1488,6 +1977,50 @@ document.addEventListener('click', async (e) => {
       return;
     }
     case 'show-protected': S.filters.prot = true; return;
+    case 'lab-choose': {
+      const id = await pickShot(labState().shot);
+      if (id) labPick(id);
+      return;
+    }
+    case 'lab-make': return labMake();
+    case 'crop-track': return cropTrack();
+    case 'crop-play': {
+      const v = $('#lbVideo'), L = labState(); if (!v) return;
+      if (v.paused) { if (v.currentTime >= L.b - 0.05 || v.currentTime < L.a) v.currentTime = L.a; v.play(); } else v.pause();
+      return;
+    }
+    case 'lab-prompt': {
+      const L = labState(); L.busy = 'prompt'; const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml();
+      const r = await act(() => api(`${P()}/lab_prompt`, { gap: (L.note || L.gap || '').trim(), shot_id: L.shot, mock: mockOn() }));
+      L.busy = ''; if (r) L.prompt = r.prompt;
+      if (f) $('#lbForm').innerHTML = labFormHtml();
+      return;
+    }
+    case 'lab-faces': {
+      const L = labState(); L.busy = 'faces'; $('#lbForm').innerHTML = labFormHtml();
+      const vv = $('#lbVideo');
+      const r = await act(() => api(`${P()}/lab_faces`, { shot_id: L.shot, t: vv ? vv.currentTime : L.t, mock: mockOn() }));
+      L.busy = '';
+      if (r) {
+        L.faces = r.faces; L.faceMethod = r.method;
+        const s = S.byId[L.shot], img = s.size && s.size[0] ? s.size : [16, 9];
+        if (r.faces.length) cropSetEditable(labFaceBox(r.faces[0], cropImgAR()));
+        if (r.method === 'none') toast(tr('这台电脑的 OpenCV 不支持找脸，填了 API Key 后会改用 AI 找；也可以手动框'), true);
+      }
+      labMediaRender(); $('#lbForm').innerHTML = labFormHtml();
+      return;
+    }
+    case 'lab-set-a': case 'lab-set-b': {
+      const v = $('#lbVideo'); if (!v) return;
+      const L = labState(); L[d.act === 'lab-set-a' ? 'a' : 'b'] = +v.currentTime.toFixed(2);
+      $('#lbForm').innerHTML = labFormHtml(); return;
+    }
+    case 'lab-play-range': {
+      const v = $('#lbVideo'), L = labState(); if (!v) return;
+      v.currentTime = L.a; v.play();
+      const stop = () => { if (v.currentTime >= L.b) { v.pause(); v.removeEventListener('timeupdate', stop); } };
+      v.addEventListener('timeupdate', stop); return;
+    }
     case 'toggle-key': S.showKey = !S.showKey; return render();
     case 'test-key': {
       S.keyTest = 'testing'; render();
@@ -1500,7 +2033,7 @@ document.addEventListener('click', async (e) => {
     case 'logs-refresh': return refreshLogs();
     case 'logs-open': await act(() => api('/api/logs/open', {})); return;
     case 'cfg-retry': S.cfgError = null; await loadSettings(); return render();
-    case 'cfg-discard': S.draft = { ...S.cfg.settings }; S.cfgDirty = false; S.newKey = ''; S.keyTest = null; return render();
+    case 'cfg-discard': S.draft = { ...S.cfg.settings }; S.cfgDirty = false; S.newKey = ''; S.newFalKey = ''; S.keyTest = null; return render();
     case 'cfg-reset': {
       if (!(await confirmBox(tr('恢复默认设置？'), tr('API Key 不受影响，其他设置都回到默认值。'), tr('恢复默认')))) return;
       const r = await act(() => api('/api/settings', { reset: true }));
@@ -1561,6 +2094,10 @@ document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.id === 'fSearch') { S.filters.q = t.value; $('#fGrid').innerHTML = gridHtml(); return; }
   if (t.id === 'logSearch') { S.logQ = t.value; clearTimeout(S.logT); S.logT = setTimeout(refreshLogs, 300); return; }
+  if (t.id === 'lbA' || t.id === 'lbB') { labState()[t.id === 'lbA' ? 'a' : 'b'] = +t.value; return; }
+  if (t.id === 'lbNote') { labState().note = t.value; return; }
+  if (t.id === 'lbPrompt') { labState().prompt = t.value; return; }
+  if (t.id === 'lbT') { labState().t = +t.value; const v = $('#lbTVal'); if (v) v.textContent = `${(+t.value).toFixed(1)}s`; return; }
   if (t.dataset.pf) {
     const li = t.closest('[data-pday]');
     const sh = S.planEdit.days[+li.dataset.pday].shots[+li.dataset.pidx];
@@ -1572,6 +2109,7 @@ document.addEventListener('input', (e) => {
     return planChanged();
   }
   if (t.id === 'cfgKey') { S.newKey = t.value.trim(); S.keyTest = null; settingsLive(); return; }
+  if (t.id === 'cfgFal') { S.newFalKey = t.value.trim(); settingsLive(); return; }
   if (t.dataset.cfg && t.type !== 'checkbox') { setDraft(t.dataset.cfg, t.value); settingsLive(); return; }
   if (t.dataset.bf) {
     const b = S.outline.beats[+t.closest('[data-beat]').dataset.beat];
@@ -1602,6 +2140,19 @@ document.addEventListener('change', async (e) => {
     const key = { pBrief: 'plan_brief', pGear: 'plan_gear', pDays: 'plan_days' }[t.id];
     await act(() => saveSettings({ [key]: t.value })); return;
   }
+  if (t.id === 'lbT') { labState().faces = null; return labLoadMedia(); }
+  if (t.id === 'lbA' || t.id === 'lbB') {         // 只更新时长提示：整块重画会把正要点的另一个输入框换掉
+    const L = labState(), el = $('#lbDur'); if (el) el.textContent = tr('做出来约 {0} 秒，不带原声。', ((L.b - L.a) / L.speed).toFixed(1));
+    if (L.tool === 'crop') {
+      if (L.cr.mode === 'track') { L.cr.tracked = null; L.cr.keys = null; }
+      cropEnsure();
+      const r = $('#cropTime'); if (r) { r.min = L.a; r.max = L.b; }
+      const v = $('#lbVideo'); if (v) { v.pause(); v.currentTime = L.a; }
+    }
+    return;
+  }
+  if (t.id === 'lbGap') { const L = labState(); L.gap = t.value; L.note = t.value; L.prompt = ''; const f = $('#lbForm'); if (f) f.innerHTML = labFormHtml(); return; }
+  if (t.id === 'lbInsert') { labState().insert = t.value; return; }
   if (t.dataset.pcheck) {
     const r = await act(() => api(`${P()}/plan_check`, { shot_id: t.dataset.pcheck, done: t.checked }));
     if (r) {

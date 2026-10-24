@@ -66,6 +66,12 @@ DEFAULTS: dict = {
     # 性能与高级
     "workers": 4,
     "render_workers": 2,          # 渲染预览时同时转几段
+    # 镜头工坊：AI 补镜头用的视频生成服务
+    "lab_provider": "mock",       # mock = 离线模拟（不花钱，用静帧做推拉）；fal = fal.ai
+    "lab_model": "fal-ai/kling-video/v2.1/standard/image-to-video",
+    "lab_base_url": "https://queue.fal.run",
+    "lab_price_per_sec": 0.06,    # 估算单价（美元 / 生成 1 秒），只用来提醒，以服务商账单为准
+    "lab_extra": "",              # 额外传给模型的参数（JSON），比如 {"negative_prompt": "blur"}
     "api_retries": 2,             # API 临时出错（超时、过载）时重试几次
     "port": 8765,
     "projects_dir": "projects",
@@ -95,6 +101,7 @@ _RULES: dict = {
     "caption_size": (float, 2, 15), "caption_pos": (int, 5, 95),
     "music_fade_in": (float, 0, 10), "music_fade_out": (float, 0, 15), "duck_ratio": (int, 1, 20),
     "render_workers": (int, 1, 16), "api_retries": (int, 0, 6),
+    "lab_provider": {"mock", "fal"}, "lab_price_per_sec": (float, 0, 10),
 }
 
 
@@ -147,6 +154,12 @@ def validate(patch: dict) -> dict:
         else:
             v = str(v or "").strip()
         clean[k] = v
+    if clean.get("lab_extra"):
+        try:
+            if not isinstance(json.loads(clean["lab_extra"]), dict):
+                raise ValueError
+        except ValueError:
+            raise ValueError("lab_extra 需要是 JSON 对象，例如 {\"negative_prompt\": \"blur\"}") from None
     if clean.get("font") and not Path(clean["font"]).expanduser().is_file():
         raise ValueError(f"找不到字体文件：{clean['font']}")
     return clean
@@ -166,20 +179,20 @@ def reset() -> dict:
     return dict(DEFAULTS)
 
 
-def write_env_key(key: str) -> None:
-    """把 API Key 写进 .env（替换已有那一行，其他行保留）。"""
+def write_env_key(key: str, var: str = "ANTHROPIC_API_KEY") -> None:
+    """把 API Key 写进 .env（替换已有那一行，其他行保留）。var：变量名，视频生成服务的 Key 用 FAL_KEY。"""
     key = key.strip().strip("\"'“”‘’").strip()
     f = Path.cwd() / ".env"
     lines = f.read_text(encoding="utf-8-sig").splitlines() if f.is_file() else []
     out, done = [], False
     for line in lines:
         name = line.split("=", 1)[0].strip().removeprefix("export ").strip()
-        if name == "ANTHROPIC_API_KEY":
+        if name == var:
             if key and not done:
-                out.append(f"ANTHROPIC_API_KEY={key}")
+                out.append(f"{var}={key}")
                 done = True
             continue
         out.append(line)
     if key and not done:
-        out.append(f"ANTHROPIC_API_KEY={key}")
+        out.append(f"{var}={key}")
     f.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")

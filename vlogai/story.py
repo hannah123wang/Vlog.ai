@@ -11,6 +11,7 @@ from datetime import datetime
 from . import config
 from .common import Project, log, read_json, write_json
 from .describe import load_logged_shots
+from .lab import lab_shots
 from .protect import enforce, must_include_block, protected
 
 SYSTEM = """You are a senior documentary/travel-vlog editor. From a log of raw shots you build a
@@ -107,8 +108,9 @@ def _max_tokens(n_segments: int) -> int:
     return max(8000, min(48000, 4000 + 140 * n_segments))
 
 
-def _validate(plan: dict, shots: list[dict]) -> dict:
-    by_id = {s["id"]: s for s in shots}
+def _validate(plan: dict, shots: list[dict], extra: list[dict] | None = None) -> dict:
+    # extra：镜头工坊做出的片段（不交给 AI 看，但时间线里可以用，AI 修改时也要保住）
+    by_id = {s["id"]: s for s in list(shots) + list(extra or [])}
     clean, dropped = [], 0
     for item in plan.get("timeline", []):
         s = by_id.get(item.get("shot_id"))
@@ -164,7 +166,7 @@ def build_story(project: Project, llm, brief: str, target_seconds: float, lang: 
                            target=int(target_seconds), lang=lang, pacing=pacing, n_segments=n_seg,
                            shots=json.dumps(_compact(shots), ensure_ascii=False),
                            must_include=must_include_block(prot, shots))
-    plan = _validate(llm.plan(SYSTEM, prompt, max_tokens=_max_tokens(n_seg)), shots)
+    plan = _validate(llm.plan(SYSTEM, prompt, max_tokens=_max_tokens(n_seg)), shots, lab_shots(project))
     plan = enforce(plan, prot, shots)
     _save(project, plan, f"initial; brief={brief!r}")
     return plan
@@ -180,7 +182,7 @@ def revise_story(project: Project, llm, instruction: str, target_seconds: float,
                                             "keep_audio", "text")} for t in current["timeline"]]
     if llm.name == "mock":
         log("  离线模式无法理解修改指令，仅重新校验现有 story.json")
-        plan = _validate(slim, shots)
+        plan = _validate(slim, shots, lab_shots(project))
     else:
         prot = protected(project, shots, target_seconds)
         pacing, n_seg = _pacing(target_seconds)
@@ -189,7 +191,7 @@ def revise_story(project: Project, llm, instruction: str, target_seconds: float,
                                       story=json.dumps(slim, ensure_ascii=False),
                                       shots=json.dumps(_compact(shots), ensure_ascii=False),
                                       must_include=must_include_block(prot, shots))
-        plan = _validate(llm.plan(SYSTEM, prompt, max_tokens=_max_tokens(n_seg)), shots)
+        plan = _validate(llm.plan(SYSTEM, prompt, max_tokens=_max_tokens(n_seg)), shots, lab_shots(project))
         plan = enforce(plan, prot, shots)
     _save(project, plan, f"revise: {instruction}")
     return plan
@@ -198,6 +200,6 @@ def revise_story(project: Project, llm, instruction: str, target_seconds: float,
 def recheck(project: Project) -> dict:
     """After hand-editing story.json: re-validate and recompute source timecodes."""
     shots = read_json(project.shots_json, [])
-    plan = _validate(read_json(project.story_json), shots)
+    plan = _validate(read_json(project.story_json), shots, lab_shots(project))
     write_json(project.story_json, plan)
     return plan

@@ -57,7 +57,8 @@ def export_xml(project: Project, music: str | None = None, out_name: str = "time
     if not tl:
         raise SystemExit("没有时间线，先运行 story")
     story = read_json(project.story_json, {}) or {}
-    clips = {c["path"]: c for c in read_json(project.clips_json, [])}
+    from .lab import all_clips
+    clips = all_clips(project)          # 包括镜头工坊做出的片段
 
     # sequence frame rate = most common source rate
     rates = [round(clips[t["src"]]["fps"]) for t in tl]

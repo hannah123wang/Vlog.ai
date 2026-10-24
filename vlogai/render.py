@@ -42,7 +42,8 @@ def final_timeline(project: Project, music: str | None, snap: bool = True) -> li
         raise SystemExit("story.json 为空，先运行 story")
     tl = story["timeline"]
     if music and snap:
-        shots = {s["id"]: (s["start"], s["end"]) for s in read_json(project.shots_json, [])}
+        from .lab import lab_shots
+        shots = {s["id"]: (s["start"], s["end"]) for s in read_json(project.shots_json, []) + lab_shots(project)}
         tl = snap_to_beats(tl, shots, detect_beats(music), float(config.get("beat_snap_range")))
     write_json(project.out("timeline_final.json"), tl)
     return tl
@@ -89,7 +90,8 @@ def render(project: Project, music: str | None = None, vertical: bool = False, h
            workers: int = 2, out_name: str = "preview.mp4", captions: bool = True,
            duck: bool = True) -> Path:
     tl = final_timeline(project, music, snap)
-    clips = {c["path"]: c for c in read_json(project.clips_json, [])}
+    from .lab import all_clips
+    clips = all_clips(project)          # 包括镜头工坊做出的片段
     cfg = config.load()
     W, H = (1080, 1920) if vertical else ((1920, 1080) if hd else (1280, 720))
     fps = int(cfg["render_fps"])

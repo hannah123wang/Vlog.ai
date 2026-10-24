@@ -1,7 +1,7 @@
-version_number: v 1.2
+version_number: v 1.3
 
 2026 Oct 23
-v 1.2 · settings + token usage
+v 1.2 · settings + token usage + shot lab
 
 == 1. 设置页：更多参数可以手动调（config.py、app.js） ==
 - 以前写死在代码里的参数都搬到了设置页，每个数字框旁边显示允许范围，改过的项有“默认 x”按钮一键恢复；
@@ -23,9 +23,26 @@ v 1.2 · settings + token usage
 - 命令行运行也会记（任务名是“命令行 describe”这样）；离线模拟不花钱，不记
 - 只统计从这个版本开始的调用
 
-== 3. 改动的文件 ==
-vlogai/usage.py（新增）、config.py、frames.py、probe.py、protect.py、story.py、beats.py、render.py、shootplan.py、llm.py、cli.py
-vlogai/studio/server.py（GET /api/settings 增加 rules：每项的取值范围；新增 GET /api/usage）、jobs.py
+== 3. 镜头工坊（新页面，新增 vlogai/lab.py） ==
+- 顶部步骤多了“4 镜头工坊”（导出变成第 5 步）。在已有素材上做新片段，原片不改动，做好的存在项目的 lab/ 里
+- 补镜头：选一个参考镜头、拖到想要的那一帧，写下缺什么（故事线页“素材撑不起的部分”可以一键带过来），
+  “让 AI 写”提示词，选 5 / 10 秒生成。视频生成服务可选：离线模拟（静帧慢推，不花钱）或 fal.ai（Kling、Veo 等，
+  按秒计费，生成前弹窗显示预计花费）；花费也记进“Token 用量”
+- 慢动作：选一段，放慢到 ½ / ⅓ / ¼。原片帧率够高（比如 120fps）直接放慢；不够就补帧：光流补帧（更顺）或帧混合（更快）
+- 裁切特写（重写过一次）：直接在这个镜头的预览视频上拖框，下面有播放和拖动条，旁边实时显示“成片效果”；
+  三种方式：固定（一个框）、推拉（起点框 → 终点框，缓入缓出，有“全景 → 特写”“特写 → 全景”快捷设置）、
+  跟随人脸（每秒取 3 帧找脸，跟住你选的那张脸，平滑后生成一串关键帧；可调“脸占画面高度”）；
+  可以“自动找脸”（本机 OpenCV；OpenCV 5 没有人脸检测时改用 AI 看一眼）；框太小会提醒放大后发糊。
+  渲染时逐帧按时间插值裁切（OpenCV 亚像素缩放），推拉和跟随都很顺
+- 修复：裁切框的遮罩会把整个网页都盖暗；竖拍素材或屏幕较矮时，框和画面对不上
+- 做好的片段可以直接放进时间线（选位置，或做完自动插入），在预览渲染和导出的 XML 里都当普通镜头用；AI 修改剪辑时也会保住它们
+- 入口：素材页镜头详情、时间线编辑区（“做慢动作”“裁切特写”，做完放回原位置后面）、故事线页的缺口
+- 设置页新增“镜头工坊”：视频生成服务、fal.ai Key（存在 .env 的 FAL_KEY）、模型、估算单价、接口地址、额外参数
+
+== 4. 改动的文件 ==
+vlogai/lab.py（新增）、usage.py（新增）、config.py、frames.py、probe.py、protect.py、story.py、beats.py、render.py、shootplan.py、llm.py、cli.py
+vlogai/studio/server.py（GET /api/settings 增加 rules；新增 GET /api/usage、镜头工坊接口）、jobs.py
+vlogai/export_xml.py、outline.py（时间线可以用镜头工坊的片段）
 vlogai/studio/web/app.js、i18n.js、style.css
 API.md
 
@@ -33,6 +50,7 @@ API.md
 - 要重启 studio（先关掉所有旧的 studio 窗口）
 - 所有新参数的默认值和以前写死的数值一样：不改设置，结果和 v 1.1 完全相同
 - 切镜头的代理文件名里带了尺寸和帧率（proxies/c0001_320p10.mp4）；改了代理宽度或帧率会生成新的代理，旧文件可以手动删掉
+- 用 fal.ai 补镜头要先在设置页填 FAL_KEY；默认是离线模拟，不会花钱
 - 命令行渲染现在会用设置页的音乐音量、压低音乐、字幕、字体和清晰度；命令行参数写了的仍然优先
 
 2026 Oct 22

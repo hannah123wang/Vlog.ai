@@ -12,6 +12,7 @@ import json
 from .common import Project, log, read_json, write_json
 from .describe import load_logged_shots
 from .protect import enforce, must_include_block, protected
+from .lab import lab_shots
 from .story import _compact, _max_tokens, _pacing, _save, _validate
 
 BEATS_SYSTEM = """You are a documentary editor in the story-planning conversation with a creator.
@@ -126,7 +127,7 @@ def story_from_beats(project: Project, llm, beats: list[dict], target_seconds: f
         shots=json.dumps(_compact(shots), ensure_ascii=False),
         must_include=must_include_block(prot, shots))
     plan = _validate(llm.plan(STORY_FROM_BEATS_SYSTEM, prompt,
-                              max_tokens=_max_tokens(n_seg)), shots)
+                              max_tokens=_max_tokens(n_seg)), shots, lab_shots(project))
     plan = enforce(plan, prot, shots)
     _save(project, plan, "from approved outline")
     return plan

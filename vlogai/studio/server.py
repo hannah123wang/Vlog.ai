@@ -19,7 +19,7 @@ from pathlib import Path
 from .. import __version__, applog, config
 from ..applog import log
 from .. import describe as describe_mod
-from .. import export_xml, frames, outline, probe, render, shootplan, sketch, story, storyboard, transcribe
+from .. import export_xml, frames, lab, outline, probe, render, shootplan, sketch, story, storyboard, transcribe
 import base64
 import time
 from ..protect import protected
@@ -174,6 +174,8 @@ def shots_payload(pid: str) -> list[dict]:
                     "frames": [media_url(pid, p, f["path"]) for f in s.get("frames", [])],
                     "created": s["created"], "gps": s.get("gps"), "has_audio": s.get("has_audio"),
                     "vertical": c.get("height", 0) > c.get("width", 0) if (c := clips.get(s["clip_id"])) else False,
+                    "fps": (clips.get(s["clip_id"]) or {}).get("fps"),
+                    "size": [(clips.get(s["clip_id"]) or {}).get("width"), (clips.get(s["clip_id"]) or {}).get("height")],
                     "tags": lg.get("tags", []), "activity": lg.get("activity", ""),
                     "best_moment": lg.get("best_moment"), "logged": bool(lg),
                     "must": s["id"] in must, "excluded": s["id"] in exc,
@@ -181,6 +183,13 @@ def shots_payload(pid: str) -> list[dict]:
                     "protected": prot.get(s["id"], ""),
                     "faces_clear": lg.get("faces_clear"), "subject_present": lg.get("subject_present"),
                     "people_together": lg.get("people_together"), "scenery_value": lg.get("scenery_value")})
+    for s in lab.lab_shots(p):          # 镜头工坊的片段：时间线要用，素材页不显示（lab 字段）
+        thumb = media_url(pid, p, s["frames"][0]["path"]) if s["frames"] else ""
+        out.append({"id": s["id"], "day": s["day"], "time": s["created"][11:16], "duration": s["duration"],
+                    "quality": 1.0, "thumb": thumb, "file": Path(s["src"]).name, "summary": s["label"],
+                    "frames": [thumb] if thumb else [], "created": s["created"], "has_audio": s["has_audio"],
+                    "lab": s["lab"], "label": s["label"], "tags": [], "logged": True,
+                    "must": False, "excluded": False, "unprotected": False, "protected": ""})
     return out
 
 
@@ -294,7 +303,7 @@ def save_plan(p: Project, body: dict) -> dict:
 def story_payload(pid: str) -> dict:
     p = project_dir(pid)
     st = read_json(p.story_json, {}) or {}
-    shots = {s["id"]: s for s in read_json(p.shots_json, []) or []}
+    shots = {s["id"]: s for s in (read_json(p.shots_json, []) or []) + lab.lab_shots(p)}
     items = []
     t = 0.0
     for i, item in enumerate(st.get("timeline", [])):
@@ -306,7 +315,8 @@ def story_payload(pid: str) -> dict:
         lg = read_json(p.logs_dir / f"{item['shot_id']}.json", {}) or {}
         dur = item["out"] - item["in"]
         items.append({**item, "i": i, "at": round(t, 1), "dur": round(dur, 2), "thumb": thumb,
-                      "summary": lg.get("summary", ""), "shot_dur": s.get("duration", 0),
+                      "summary": lg.get("summary", "") or s.get("label", ""), "shot_dur": s.get("duration", 0),
+                      "lab": s.get("lab", ""),
                       "quality": s.get("quality"), "highlight": lg.get("highlight")})
         t += dur
     return {"title": st.get("title", ""), "logline": st.get("logline", ""),
@@ -382,6 +392,41 @@ def job_render(pid: str, music: str | None, vertical: bool, hd: bool):
     export_xml.export_xml(p, music=music or None)
 
 
+def lab_payload(p: Project) -> dict:
+    pid = p.root.name
+    ol = read_json(p.out("outline.json"), {}) or {}
+    items = []
+    for a in lab.assets(p):
+        items.append({k: v for k, v in a.items() if k != "path"} | {
+            "url": f"/media/{urllib.parse.quote(pid)}/{a['file']}",
+            "thumb_url": f"/media/{urllib.parse.quote(pid)}/{a['thumb']}" if a.get("thumb") else ""})
+    used = {t["shot_id"] for t in (read_json(p.story_json, {}) or {}).get("timeline", [])}
+    for a in items:
+        a["in_timeline"] = a["id"] in used
+    OW, OH = lab.out_size(p)
+    return {"assets": items[::-1], "gaps": ol.get("missing", []), "provider": config.get("lab_provider"),
+            "model": config.get("lab_model"), "price_per_sec": config.get("lab_price_per_sec"),
+            "fal_key": lab.key_hint(), "out": [OW, OH], "has_story": bool(used)}
+
+
+def job_lab(pid: str, kind: str, b: dict, mock: bool):
+    p = project_dir(pid)
+    if kind == "crop":
+        lab.crop(p, b["shot_id"], b.get("in"), b.get("out"), b.get("keys"), b.get("label", ""),
+                 box=b.get("box"), motion=b.get("motion", "static"))
+    elif kind == "slowmo":
+        lab.slowmo(p, b["shot_id"], b.get("in"), b.get("out"), float(b.get("speed") or 0.5),
+                   b.get("method", "auto"), b.get("label", ""))
+    else:
+        lab.fill(p, b["shot_id"], float(b.get("t") or 0), b.get("prompt", ""), int(b.get("seconds") or 5),
+                 b.get("gap", ""), b.get("label", ""), mock=mock)
+    if b.get("insert_at") is not None and (read_json(p.story_json, {}) or {}).get("timeline"):
+        newest = lab.assets(p)[-1]["id"]
+        lab.insert(p, newest, int(b["insert_at"]))
+        storyboard.storyboard(p)
+        print(f"[vlogai] 已放进时间线第 {int(b['insert_at']) + 1} 个位置")
+
+
 def job_export(pid: str):
     p = project_dir(pid)
     s = p.settings()
@@ -422,7 +467,7 @@ def save_timeline(pid: str, items: list, note: str = "手动编辑") -> dict:
         new.append(item)
     plan = {k: st[k] for k in ("title", "logline", "chapters") if k in st}
     plan["timeline"] = new
-    plan = story._validate(plan, read_json(p.shots_json, []) or [])
+    plan = story._validate(plan, read_json(p.shots_json, []) or [], lab.lab_shots(p))
     story._save(p, plan, note)
     storyboard.storyboard(p)
     return story_payload(pid)
@@ -434,7 +479,7 @@ def restore_version(pid: str, n: int) -> dict:
     if not v:
         raise ValueError(f"没有 v{n}")
     plan = {k: v[k] for k in ("title", "logline", "chapters", "timeline") if k in v}
-    plan = story._validate(plan, read_json(p.shots_json, []) or [])
+    plan = story._validate(plan, read_json(p.shots_json, []) or [], lab.lab_shots(p))
     story._save(p, plan, f"恢复 v{n}")
     storyboard.storyboard(p)
     return story_payload(pid)
@@ -446,7 +491,7 @@ def settings_payload() -> dict:
             "settings_file": str(config.path()), "env_file": str(Path.cwd() / ".env"),
             "projects_path": str(PROJECTS), "detected_font": render.find_font(None) or "",
             "has_whisper": find_spec("faster_whisper") is not None,
-            "running_port": RUNNING.get("port"),
+            "running_port": RUNNING.get("port"), "fal_key": lab.key_hint(),
             # 每项的取值范围，网页保存前先检查，出错时能说出是哪一项
             "rules": {k: ([r[1], r[2]] if isinstance(r, tuple) else sorted(r, key=str))
                       for k, r in config._RULES.items()}}
@@ -671,6 +716,9 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 p = project_dir(urllib.parse.unquote(m.group(1)))
                 return self.json(read_json(p.out("outline.json"), {}) or {})
+            m = re.fullmatch(r"/api/projects/([^/]+)/lab", path)
+            if m:
+                return self.json(lab_payload(project_dir(urllib.parse.unquote(m.group(1)))))
             m = re.fullmatch(r"/api/projects/([^/]+)/shootplan", path)
             if m:
                 return self.json(plan_payload(project_dir(urllib.parse.unquote(m.group(1)))))
@@ -701,6 +749,9 @@ class Handler(BaseHTTPRequestHandler):
                     config.reset()
                     applog.set_level(config.get("log_level"))
                     log.info("设置已恢复默认")
+                if b.get("fal_key"):
+                    config.write_env_key(b["fal_key"], lab.FAL_KEY_VAR)
+                    log.info(f"视频生成服务 Key 已更新：{lab.key_hint()['hint']}")
                 if b.get("api_key"):
                     config.write_env_key(b["api_key"])
                     log.info(f"API Key 已更新：{key_hint()['hint']}")
@@ -766,8 +817,15 @@ class Handler(BaseHTTPRequestHandler):
                 runner.start("导出时间线", pid, job_export, pid)
             elif action == "recheck":
                 runner.start("重新校验", pid, job_recheck, pid)
+            elif action == "lab_make":          # 镜头工坊：慢动作 / 裁切 / 补镜头（后台任务）
+                kind = b.get("kind")
+                if kind not in lab.KINDS or not b.get("shot_id"):
+                    raise ValueError("参数不对：需要 kind（fill / slowmo / crop）和 shot_id")
+                name = {"fill": "AI 补镜头", "slowmo": "做慢动作", "crop": "裁切特写"}[kind]
+                runner.start(name, pid, job_lab, pid, kind, b, mock)
             elif action in ("timeline", "restore", "flag", "settings", "open_folder", "plan_check", "plan_save",
-                            "plan_ref", "plan_ref_del"):
+                            "plan_ref", "plan_ref_del", "lab_preview", "lab_still", "lab_faces", "lab_track", "lab_prompt",
+                            "lab_insert", "lab_delete", "lab_rename"):
                 return self.json(self._sync_action(pid, action, b))
             else:
                 return self.json({"error": f"unknown action {action}"}, 404)
@@ -831,6 +889,41 @@ def _sync_action(self, pid: str, action: str, b: dict):
         return {"done": done}
     if action == "plan_save":
         return save_plan(p, b)
+    media = lambda f: f"/media/{urllib.parse.quote(pid)}/" + str(Path(f).relative_to(p.root)).replace(os.sep, "/")  # noqa: E731
+    if action == "lab_preview":        # 工坊里播放用的小预览
+        return {"url": media(lab.preview(p, str(b.get("shot_id", ""))))}
+    if action == "lab_still":
+        return {"url": media(lab.still(p, str(b.get("shot_id", "")), float(b.get("t") or 0)))}
+    if action == "lab_faces":
+        sid, tt = str(b.get("shot_id", "")), float(b.get("t") or 0)
+        found, method = lab.faces(p, sid, tt, None if b.get("mock") else get_llm(False) if key_hint()["has_key"] else None)
+        return {"faces": found, "method": method, "url": media(lab.still(p, sid, tt))}
+    if action == "lab_track":          # 跟随人脸：算出裁切关键帧
+        llm = None if b.get("mock") or not key_hint()["has_key"] else get_llm(False)
+        return lab.track(p, str(b.get("shot_id", "")), b.get("in"), b.get("out"), b.get("seed"),
+                         b.get("seed_t"), float(b.get("tight") or 0.38), llm)
+    if action == "lab_prompt":         # 让 AI 写给视频模型的提示词
+        llm = get_llm(bool(b.get("mock")))
+        return {"prompt": lab.draft_prompt(p, llm, b.get("gap", ""), b.get("shot_id", ""), b.get("note", ""))}
+    if action == "lab_insert":
+        if runner.busy:
+            raise RuntimeError(f"已经有任务在跑：{runner.current.name}，等它结束再放进时间线")
+        lab.insert(p, str(b.get("id", "")), b.get("at"))
+        storyboard.storyboard(p)
+        return lab_payload(p)
+    if action == "lab_delete":
+        used = {t["shot_id"] for t in (read_json(p.story_json, {}) or {}).get("timeline", [])}
+        if b.get("id") in used:
+            raise ValueError("这个片段还在时间线里，先在时间线里删掉它")
+        lab.delete(p, str(b.get("id", "")))
+        return lab_payload(p)
+    if action == "lab_rename":
+        items = read_json(p.out(lab.LAB_JSON), []) or []
+        for a in items:
+            if a.get("id") == b.get("id"):
+                a["label"] = str(b.get("label", "")).strip()[:60]
+        write_json(p.out(lab.LAB_JSON), items)
+        return lab_payload(p)
     if action == "plan_ref":           # 给镜头附参考图
         return add_plan_ref(p, b)
     if action == "plan_ref_del":
