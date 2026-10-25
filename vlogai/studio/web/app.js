@@ -478,7 +478,7 @@ async function newPlanProject(name) {
 const LAB_TOOLS = [['fill', '补镜头'], ['slowmo', '慢动作'], ['crop', '裁切特写']];
 const LAB_KIND = { fill: '补镜头', slowmo: '慢动作', crop: '裁切特写' };
 function labState() {
-  if (!S.lb) S.lb = { tool: 'fill', shot: null, a: 0, b: 0, t: 0, box: null, motion: 'push_in', speed: 0.5, method: 'auto',
+  if (!S.lb) S.lb = { tool: 'fill', shot: null, a: 0, b: 0, t: 0, box: null, motion: 'push_in', speed: 0.5, method: 'auto', quality: 'fine',
     seconds: 5, gap: '', note: '', prompt: '', insert: 'end', faces: null, faceMethod: '', still: '', still_t: null, preview: '', busy: '',
     cr: { mode: 'fixed', keys: null, edit: 1, tight: 0.38, tracked: null, seed: null } };
   return S.lb;
@@ -566,8 +566,9 @@ function labFormHtml() {
     return `${labRangeHtml(s)}
       <div class="section"><div class="label">${tr('放慢到')}</div>${labSeg('speed', [[0.5, '½ 速'], [0.33, '⅓ 速'], [0.25, '¼ 速']])}</div>
       <div class="section"><div class="label">${tr('补帧方式')}</div>${labSeg('method', [['auto', '自动'], ['flow', '光流补帧'], ['blend', '帧混合']])}</div>
+      ${!native && L.method !== 'blend' ? `<div class="section"><div class="label">${tr('光流质量')}</div>${labSeg('quality', [['fine', '标准'], ['fast', '快速']])}</div>` : ''}
       <p class="note">${native ? tr('原片是 {0}fps，直接放慢就够顺，不用补帧。', Math.round(fps))
-        : tr('原片是 {0}fps，要补帧。光流补帧更顺但慢一些；帧混合快，但动作快时会有重影。', Math.round(fps))}
+        : tr('原片是 {0}fps，要补帧。光流补帧更顺但慢一些；帧混合快，但动作快时会有重影。', Math.round(fps)) + (L.method !== 'blend' ? ' ' + tr('“快速”大约快一半，动作复杂时偶尔有小块瑕疵。') : '')}
         <span id="lbDur">${tr('做出来约 {0} 秒，不带原声。', ((L.b - L.a) / L.speed).toFixed(1))}</span></p>`;
   }
   return cropFormHtml(s);
@@ -672,7 +673,7 @@ async function labMake() {
   } else {
     if (!(L.b - L.a >= 0.3)) { toast(tr('“到”要比“从”晚至少 0.3 秒'), true); return; }
     Object.assign(body, { in: L.a, out: L.b });
-    if (L.tool === 'slowmo') Object.assign(body, { speed: L.speed, method: L.method });
+    if (L.tool === 'slowmo') Object.assign(body, { speed: L.speed, method: L.method, quality: L.quality });
     else {
       const C = L.cr;
       if (C.mode === 'track' && !C.tracked) { toast(tr('先点“开始跟随”，看一下效果再裁切'), true); return; }
@@ -1604,6 +1605,9 @@ function viewSettings() {
 
     <section class="set-card" id="sec-lab">
       <div><h2>${tr('镜头工坊')}</h2><p class="lead">${tr('“补镜头”要用视频生成服务（按生成的秒数收费，和 Anthropic 分开结算）。慢动作和裁切在本机做，不花钱。')}</p></div>
+      <div class="set-grid">
+        ${num('lab_slowmo_workers', '慢动作同时算几块', { step: 1, help: tr('0 = 自动（按 CPU 核数和空闲内存）。光流补帧每块约占 1 GB 内存，电脑卡就调小。') })}
+      </div>
       <div class="set-row"><div class="lbl">${tr('视频生成服务')}</div>
         <div style="max-width:420px">${seg('lab_provider', [['mock', '离线模拟', '不花钱，测流程'], ['fal', 'fal.ai', '可选 Kling、Veo 等']])}</div></div>
       ${d.lab_provider === 'fal' ? `<div class="set-row"><label class="lbl" for="cfgFal">fal.ai Key</label>

@@ -416,7 +416,7 @@ def job_lab(pid: str, kind: str, b: dict, mock: bool):
                  box=b.get("box"), motion=b.get("motion", "static"))
     elif kind == "slowmo":
         lab.slowmo(p, b["shot_id"], b.get("in"), b.get("out"), float(b.get("speed") or 0.5),
-                   b.get("method", "auto"), b.get("label", ""))
+                   b.get("method", "auto"), b.get("label", ""), quality=b.get("quality", "fine"))
     else:
         lab.fill(p, b["shot_id"], float(b.get("t") or 0), b.get("prompt", ""), int(b.get("seconds") or 5),
                  b.get("gap", ""), b.get("label", ""), mock=mock)

@@ -72,6 +72,7 @@ DEFAULTS: dict = {
     "lab_base_url": "https://queue.fal.run",
     "lab_price_per_sec": 0.06,    # 估算单价（美元 / 生成 1 秒），只用来提醒，以服务商账单为准
     "lab_extra": "",              # 额外传给模型的参数（JSON），比如 {"negative_prompt": "blur"}
+    "lab_slowmo_workers": 0,      # 慢动作补帧同时算几块；0 = 按 CPU 核数和空闲内存自动定
     "api_retries": 2,             # API 临时出错（超时、过载）时重试几次
     "port": 8765,
     "projects_dir": "projects",
@@ -101,7 +102,7 @@ _RULES: dict = {
     "caption_size": (float, 2, 15), "caption_pos": (int, 5, 95),
     "music_fade_in": (float, 0, 10), "music_fade_out": (float, 0, 15), "duck_ratio": (int, 1, 20),
     "render_workers": (int, 1, 16), "api_retries": (int, 0, 6),
-    "lab_provider": {"mock", "fal"}, "lab_price_per_sec": (float, 0, 10),
+    "lab_provider": {"mock", "fal"}, "lab_price_per_sec": (float, 0, 10), "lab_slowmo_workers": (int, 0, 32),
 }
 
 
