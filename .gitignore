@@ -36,3 +36,6 @@ vlogai_settings.json
 
 # 运行日志
 logs/
+
+# 远程登录 cookie 的签名密钥
+.vlogai_secret
