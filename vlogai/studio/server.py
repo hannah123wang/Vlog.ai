@@ -21,6 +21,8 @@ from ..applog import log
 from .. import describe as describe_mod
 from .. import export_xml, frames, lab, outline, probe, render, shootplan, sketch, story, storyboard, transcribe
 import base64
+import shutil
+import threading
 import time
 from ..protect import protected
 from ..common import VIDEO_EXTS, Project, read_json, require_ffmpeg, write_json
@@ -55,6 +57,87 @@ def flags(p: Project) -> dict:
 
 def media_url(pid: str, p: Project, path: str) -> str:
     return f"/media/{pid}/" + str(Path(path).relative_to(p.root)).replace(os.sep, "/")
+
+
+# ---------------------------------------------------------------- 从浏览器上传素材（手机相册 / 别的电脑）
+# 浏览器拿不到本机文件路径，只能把文件内容传过来。按块传（每块几 MB），断了可以从断点续传。
+# 传到哪：项目已经有素材文件夹就放进去（这样一次扫描能看到全部素材），否则放项目里的 footage/。
+UPLOAD_CHUNK_MAX = 64 * 1024 * 1024
+_upload_lock = threading.Lock()
+
+
+def upload_target(p: Project) -> Path:
+    cur = p.settings().get("footage") or ""
+    if cur and Path(cur).is_dir():
+        return Path(cur)
+    return p.root / "footage"
+
+
+def upload_filename(name: str) -> str:
+    base = Path(str(name).replace("\\", "/")).name
+    stem, ext = os.path.splitext(base)
+    if ext.lower() not in VIDEO_EXTS:
+        raise ValueError(f"不是支持的视频格式：{base}")
+    stem = re.sub(r"[^\w\-. ]", "_", stem).strip().lstrip(".") or "video"
+    return stem[:120] + ext
+
+
+def handle_upload(pid: str, q: dict, data: bytes) -> dict:
+    """q：name 文件名、total 总字节数、offset 这一块从哪开始、mtime 毫秒、probe=1 只问进度。"""
+    p = project_dir(pid)
+    arg = lambda k, d="": (q.get(k) or [d])[0]  # noqa: E731
+    total = int(arg("total", "0"))
+    if total <= 0:
+        raise ValueError("文件大小不对")
+    folder = upload_target(p)
+    name = upload_filename(arg("name"))
+    with _upload_lock:
+        if arg("probe") == "1":
+            if p.root.is_dir() and not any(p.root.iterdir()):
+                p.root.rmdir()          # 只是问进度，不留空项目文件夹（Project() 会自动建目录）
+            # 同名同大小：当成已经传过（重复选同一批视频不会传两遍）；同名不同大小：换个名字
+            final = folder / name
+            n = 1
+            while final.exists() and final.stat().st_size != total:
+                stem, ext = os.path.splitext(name)
+                final = folder / f"{stem}_{n}{ext}"
+                n += 1
+            if final.exists():
+                return {"name": final.name, "have": total, "done": True, "footage": str(folder)}
+            part = final.with_name(final.name + ".part")
+            have = part.stat().st_size if part.exists() else 0
+            disk = next(d for d in (folder, *folder.parents) if d.exists())
+            if not have and shutil.disk_usage(disk).free < total + 512 * 1024 * 1024:
+                raise ValueError(f"电脑硬盘空间不够了：{folder}")
+            return {"name": final.name, "have": have, "done": False, "footage": str(folder)}
+
+        final = folder / name
+        part = final.with_name(final.name + ".part")
+        offset = int(arg("offset", "0"))
+        have = part.stat().st_size if part.exists() else 0
+        if final.exists():
+            return {"name": name, "have": total, "done": True, "footage": str(folder)}
+        if offset != have:              # 断点对不上：告诉浏览器从哪继续
+            return {"name": name, "have": have, "done": False, "footage": str(folder), "resync": True}
+        folder.mkdir(parents=True, exist_ok=True)
+        if not p.settings().get("created"):
+            p.save_settings(created=date.today().isoformat())
+        with part.open("ab") as f:
+            f.write(data)
+        have += len(data)
+        if have > total:
+            part.unlink(missing_ok=True)
+            raise ValueError("收到的数据比文件还大，已丢弃，请重新上传")
+        if have == total:
+            part.replace(final)
+            try:
+                mt = int(arg("mtime", "0")) / 1000
+                if mt > 0:
+                    os.utime(final, (mt, mt))   # 保留拍摄 / 修改时间：视频里没有拍摄时间时按它分天
+            except (ValueError, OSError):
+                pass
+            log.info(f"上传完成：{pid}/{final.name}（{total / 1048576:.1f} MB）")
+        return {"name": name, "have": have, "done": have == total, "footage": str(folder)}
 
 
 def mtime(path: Path) -> float:
@@ -513,7 +596,9 @@ RUNNING: dict = {}
 # 现在只放行：studio 自己的页面、本机开发服务器、Lovable，以及设置里额外填写的网址。
 DEFAULT_ORIGINS = [r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?",
                    r"https://[\w.-]+\.lovable\.app", r"https://[\w.-]+\.lovableproject\.com",
-                   r"https://(www\.)?lovable\.dev"]
+                   r"https://(www\.)?lovable\.dev",
+                   r"https://[\w-]+\.[\w-]+\.ts\.net"]          # Tailscale Serve：手机远程访问（只有自己的 tailnet 设备能连）
+TAILSCALE_HOST = re.compile(r"[\w-]+\.[\w-]+\.ts\.net")
 
 
 def origin_allowed(origin: str) -> bool:
@@ -528,12 +613,90 @@ def origin_allowed(origin: str) -> bool:
 def host_allowed(host: str) -> bool:
     """挡住 DNS rebinding：请求必须是发给 127.0.0.1 / localhost 的。"""
     h = (host or "").rsplit(":", 1)[0] if not (host or "").startswith("[") else host.split("]")[0] + "]"
-    return h in ("127.0.0.1", "localhost", "[::1]", "")
+    return h in ("127.0.0.1", "localhost", "[::1]", "") or bool(TAILSCALE_HOST.fullmatch(h.lower()))
+
+
+# ---------------------------------------------------------------- 远程访问（tailscale funnel 公开给别人用）
+# 本机：直接在这台电脑上打开（127.0.0.1，没有经过任何转发）→ 什么都能做，不用密码。
+# 远程：经过 tailscale / cloudflared 等转发进来的请求 → 要先输入“远程访问密码”，
+#       而且碰不到这台电脑本身：不能浏览电脑里的文件夹、不能看/改设置和 API Key、不能看日志、不能打开文件夹。
+_FORWARD_HEADERS = ("X-Forwarded-For", "X-Forwarded-Host", "Forwarded", "Cf-Connecting-Ip", "Tailscale-Funnel-Request")
+AUTH_COOKIE = "vlogai_auth"
+REMOTE_BLOCKED_GET = {"/api/ls", "/api/logs"}
+REMOTE_BLOCKED_POST = {"/api/settings", "/api/settings/test", "/api/logs/open", "/api/settings/open_projects"}
+REMOTE_BLOCKED_ACTIONS = {"open_folder"}
+_login_fails: dict = {}          # ip -> [失败时间…]，挡住暴力猜密码
+_secret_cache: list = []
+
+
+def _secret() -> bytes:
+    """本机随机密钥（存在 .vlogai_secret），用来签登录 cookie。改密码后旧 cookie 自动失效。"""
+    if not _secret_cache:
+        f = Path.cwd() / ".vlogai_secret"
+        try:
+            s = f.read_text(encoding="utf-8").strip()
+        except OSError:
+            s = ""
+        if len(s) < 32:
+            s = base64.urlsafe_b64encode(os.urandom(32)).decode()
+            try:
+                f.write_text(s, encoding="utf-8")
+            except OSError:
+                pass
+        _secret_cache.append(s.encode())
+    return _secret_cache[0]
+
+
+def auth_token(password: str) -> str:
+    import hashlib
+    import hmac
+    return hmac.new(_secret(), ("vlogai-remote:" + password).encode(), hashlib.sha256).hexdigest()
+
+
+def remote_password() -> str:
+    return str(config.get("remote_password") or "")
+
+
+def inside_projects(path: str) -> bool:
+    try:
+        f = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return False
+    return f == PROJECTS or PROJECTS in f.parents
+
+
+LOGIN_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>vlogai</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#14110f;color:#f3ede6;
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;padding:24px}
+.card{width:100%;max-width:380px;background:#1e1a17;border:1px solid #3a332d;border-radius:16px;padding:28px}
+h1{margin:0 0 4px;font-size:24px}p{margin:0 0 20px;color:#b3a89c;font-size:14px}
+input{width:100%;font-size:18px;padding:14px;border-radius:10px;border:1px solid #4a4038;background:#14110f;color:inherit;margin-bottom:12px}
+button{width:100%;font-size:17px;font-weight:700;padding:14px;border:0;border-radius:10px;background:#e8a24a;color:#1a1208}
+button:disabled{opacity:.6}.err{color:#ff8a7a;font-size:14px;min-height:22px;margin:4px 0 0}
+</style></head><body><form class="card" id="f">
+<h1>vlogai</h1>__BODY__
+</form><script>
+const f=document.getElementById('f');
+f&&f.addEventListener('submit',async(e)=>{e.preventDefault();const b=f.querySelector('button'),m=document.getElementById('m');
+if(!b)return;b.disabled=true;m.textContent='';
+try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({password:document.getElementById('p').value})});const d=await r.json().catch(()=>({}));
+if(r.ok&&d.ok){location.replace('/');return;}m.textContent=d.error||('出错了 ('+r.status+')');}
+catch(err){m.textContent='连不上，检查一下网络 / Can\\'t connect';}b.disabled=false;});
+</script></body></html>"""
+LOGIN_FORM = """<p>请输入访问密码 · Enter the access password</p>
+<input id="p" type="password" autocomplete="current-password" autofocus placeholder="密码 / Password">
+<button type="submit">进入 · Enter</button><div class="err" id="m"></div>"""
+LOGIN_CLOSED = """<p>这台电脑还没有开放远程访问。<br>请让主人在 studio 的“设置 → 远程访问密码”里设一个密码。</p>
+<p>Remote access isn't enabled yet. Ask the owner to set a remote access password in studio settings.</p>"""
 
 
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     server_version = "vlogai-studio"
+    remote = True                        # 没经过 _guard 判断时按“远程”处理（更安全）
 
     def _guard(self) -> bool:
         """不允许的来源直接 403。返回 True 表示可以继续。"""
@@ -546,6 +709,86 @@ class Handler(BaseHTTPRequestHandler):
             log.warning(f"拒绝来自 {origin} 的请求：{self.command} {self.path.split('?')[0]}"
                         "（需要的话在设置 → 性能与高级 → 允许访问的网页里添加）")
             self.json({"error": f"origin not allowed: {origin}"}, 403)
+            return False
+        self.remote = self._is_remote()
+        if not self.remote:
+            return True
+        return self._remote_guard()
+
+    # -- 远程访问
+    def _is_remote(self) -> bool:
+        if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return True
+        if any(self.headers.get(h) for h in _FORWARD_HEADERS):
+            return True                  # 经过 tailscale serve/funnel、cloudflared 转发
+        h = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        return h not in ("127.0.0.1", "localhost", "[::1]", "")
+
+    def _client_ip(self) -> str:
+        fwd = self.headers.get("Cf-Connecting-Ip") or (self.headers.get("X-Forwarded-For") or "").split(",")[0]
+        return fwd.strip() or self.client_address[0]
+
+    def _authed(self) -> bool:
+        pw = remote_password()
+        if not pw:
+            return False
+        import hmac
+        from http.cookies import SimpleCookie
+        try:
+            c = SimpleCookie(self.headers.get("Cookie") or "")
+        except Exception:  # noqa: BLE001
+            return False
+        got = c[AUTH_COOKIE].value if AUTH_COOKIE in c else ""
+        return bool(got) and hmac.compare_digest(got, auth_token(pw))
+
+    def _login_page(self):
+        body = LOGIN_HTML.replace("__BODY__", LOGIN_FORM if remote_password() else LOGIN_CLOSED)
+        self._send(200, body.encode(), "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+
+    def _do_login(self):
+        import hmac
+        ip = self._client_ip()
+        now = time.time()
+        fails = [t for t in _login_fails.get(ip, []) if now - t < 900]
+        _login_fails[ip] = fails
+        if len(fails) >= 8:
+            return self.json({"error": "密码错太多次了，15 分钟后再试 / Too many attempts, try again in 15 minutes"}, 429)
+        pw = remote_password()
+        if not pw:
+            return self.json({"error": "还没有开放远程访问 / Remote access is not enabled"}, 403)
+        try:
+            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+            got = str(json.loads(self.rfile.read(n) or b"{}").get("password", ""))
+        except (ValueError, AttributeError):
+            got = ""
+        if not hmac.compare_digest(got.encode(), pw.encode()):
+            fails.append(now)
+            log.warning(f"远程登录失败：{ip}（15 分钟内第 {len(fails)} 次）")
+            time.sleep(1)
+            return self.json({"error": "密码不对 / Wrong password"}, 401)
+        _login_fails.pop(ip, None)
+        log.info(f"远程登录成功：{ip}")
+        cookie = f"{AUTH_COOKIE}={auth_token(pw)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure"
+        body = json.dumps({"ok": True}).encode()
+        self._send(200, body, "application/json", {"Set-Cookie": cookie})
+
+    def _remote_guard(self) -> bool:
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/login" and self.command == "POST":
+            self._do_login()
+            return False
+        if not self._authed():
+            if self.command in ("GET", "HEAD") and not path.startswith(("/api/", "/media/", "/static/")):
+                self._login_page()
+            else:
+                self.json({"error": "需要先登录 / Please log in", "login": True}, 401)
+            return False
+        blocked = (self.command == "GET" and path in REMOTE_BLOCKED_GET) or \
+                  (self.command == "POST" and path in REMOTE_BLOCKED_POST) or \
+                  (self.command == "POST" and path.rsplit("/", 1)[-1] in REMOTE_BLOCKED_ACTIONS
+                   and path.startswith("/api/projects/"))
+        if blocked:
+            self.json({"error": "这个功能只能在运行 studio 的电脑上用 / Only available on the host computer"}, 403)
             return False
         return True
 
@@ -638,6 +881,9 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
+        if WEB.resolve() in path.resolve().parents:
+            # 界面文件（html/js/css）：每次先问服务器有没有更新，代码更新后不会出现“新 JS + 旧 CSS”的错位
+            self.send_header("Cache-Control", "no-cache")
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header("Content-Length", str(max(0, end - start + 1)))
@@ -683,9 +929,21 @@ class Handler(BaseHTTPRequestHandler):
                 drives = ([f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
                           if os.name == "nt" else [])
                 kh = key_hint()
+                if self.remote:              # 远程用户：不告诉他电脑上的路径和 Key
+                    return self.json({"has_key": kh["has_key"], "key": {"has_key": kh["has_key"]},
+                                      "version": __version__, "home": "", "cwd": "", "drives": [], "remote": True})
                 return self.json({"has_key": kh["has_key"], "key": kh, "version": __version__,
-                                  "home": str(Path.home()), "cwd": str(Path.cwd()), "drives": drives})
+                                  "home": str(Path.home()), "cwd": str(Path.cwd()), "drives": drives,
+                                  "remote": False})
             if path == "/api/settings":
+                if self.remote:              # 页面启动时要读几个开关（转写、高清…），路径、Key、密码都不给
+                    hide = {"remote_password", "allowed_origins", "base_url", "projects_dir", "font"}
+                    pl = settings_payload()
+                    pl["settings"] = {k: v for k, v in pl["settings"].items() if k not in hide}
+                    pl["defaults"] = {k: v for k, v in pl["defaults"].items() if k not in hide}
+                    pl.update(key={"has_key": pl["key"]["has_key"]}, fal_key={"has_key": pl["fal_key"].get("has_key")},
+                              settings_file="", env_file="", projects_path="", detected_font="")
+                    return self.json(pl)
                 return self.json(settings_payload())
             if path == "/api/logs":
                 return self.json({"entries": applog.read_entries(q.get("level", ["DEBUG"])[0], q.get("q", [""])[0],
@@ -743,6 +1001,14 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         path = u.path
         try:
+            m = re.fullmatch(r"/api/projects/([^/]+)/upload", path)
+            if m:                               # 上传素材：请求体是视频的一块原始字节，不是 JSON
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > UPLOAD_CHUNK_MAX:
+                    raise ValueError("上传的分块太大")
+                data = self.rfile.read(n) if n else b""
+                return self.json(handle_upload(urllib.parse.unquote(m.group(1)),
+                                               urllib.parse.parse_qs(u.query), data))
             b = self.body()
             if path == "/api/settings":
                 if b.get("reset"):
@@ -781,6 +1047,8 @@ class Handler(BaseHTTPRequestHandler):
                     p.save_settings(created=p.settings().get("created") or date.today().isoformat())
                     log.info(f"新建项目（还没有素材）：{pid}")
                     return self.json({"id": pid, "started": None})
+                if self.remote and not inside_projects(footage):
+                    raise ValueError("远程只能用上传的视频，不能选电脑里的文件夹")
                 if not Path(footage).expanduser().is_dir():
                     raise ValueError(f"素材文件夹不存在：{footage}")
                 runner.start("扫描素材", pid, job_scan, pid, footage)
@@ -793,6 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
             lang = b.get("lang") or config.get("lang")
             mock = bool(b.get("mock"))
             minutes = float(b.get("minutes") or project_dir(pid).settings().get("minutes") or 3)
+            if self.remote and b.get("music") and not inside_projects(str(b["music"])):
+                raise ValueError("远程不能使用电脑里的音乐文件路径")
 
             if action == "analyze":
                 runner.start("看素材", pid, job_analyze, pid, mock, lang,

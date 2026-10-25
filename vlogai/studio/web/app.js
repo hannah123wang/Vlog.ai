@@ -40,9 +40,11 @@ async function api(path, body) {
   let r;
   try { r = await fetch(path, opt); } catch (e) { const err = new Error(e.message); err.offline = true; throw err; }
   const d = await r.json().catch(() => ({ error: tr('服务器没有返回 JSON') }));
+  if (r.status === 401 && d.login) { location.reload(); throw new Error(d.error); }   // 远程登录过期 / 密码改了：回到输密码页
   if (!r.ok || d.error) throw new Error(trServer(d.error) || tr('请求失败 ({0})', r.status));
   return d;
 }
+const REMOTE = () => !!(S.env && S.env.remote);
 /* /api/job 的 error 字段是“上一个任务为什么失败”，不是这次请求失败，所以不能走 api()。 */
 async function getJob(since = 0) {
   let r;
@@ -135,6 +137,123 @@ async function browse(kind, start) {
   });
   if (r === 'plan') return { planOnly: true, name };
   return r === 'ok' ? { path: chosen, name } : null;
+}
+
+/* ---------------------------------------------------------------- 从这台设备上传视频
+ * 手机 / 别的电脑打开网页时，素材在“这台设备”上，不在运行 vlogai 的电脑上。
+ * 浏览器选文件 → 按 8MB 一块传到电脑（项目的素材文件夹）→ 照常扫描、看片。
+ * 网络断了会自动重试；中途停下再传同一批，已传完的文件和已传的部分都会跳过。 */
+const VIDEO_RE = /\.(mp4|mov|m4v|mts|m2ts|avi|mkv|insv|lrv)$/i;
+const UP_CHUNK = 8 * 1024 * 1024;
+const fmtSize = (b) => (b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : (b / 1048576).toFixed(b >= 104857600 ? 0 : 1) + ' MB');
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+/** 相册里选的视频有时文件名没有后缀，按类型补一个 */
+function upName(f) {
+  if (VIDEO_RE.test(f.name)) return f.name;
+  const ext = { 'video/quicktime': '.mov', 'video/mp4': '.mp4', 'video/x-m4v': '.m4v', 'video/x-matroska': '.mkv', 'video/avi': '.avi', 'video/x-msvideo': '.avi' }[f.type] || '.mp4';
+  return (f.name || 'video') + ext;
+}
+async function upReq(pid, q, blob) {
+  const url = `/api/projects/${enc(pid)}/upload?` + new URLSearchParams(q);
+  for (let a = 0; ; a++) {
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: blob || new Blob([]) });
+      const d = await r.json().catch(() => ({ error: tr('服务器没有返回 JSON') }));
+      if (r.status >= 400 && r.status < 500) { const e = new Error(trServer(d.error) || tr('请求失败 ({0})', r.status)); e.fatal = true; throw e; }
+      if (!r.ok || d.error) throw new Error(trServer(d.error) || tr('请求失败 ({0})', r.status));
+      return d;
+    } catch (e) {
+      if (e.fatal || a >= 6) throw e;
+      await sleep(Math.min(15000, 1000 * 2 ** a));      // 网络抖一下：1、2、4、8… 秒后重试
+    }
+  }
+}
+async function uploadVideos(isNew) {
+  const canDir = 'webkitdirectory' in document.createElement('input') && !/iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  let files = [], pid = isNew ? '' : S.pid, footage = '', aborted = false, busy = false, wake = null;
+  const html = `<h2>${isNew ? tr('新建项目：上传视频') : tr('上传更多视频')}</h2>
+    <p class="note">${tr('从这台设备（手机相册、本地文件夹）选视频，传到运行 vlogai 的电脑上处理。上传时请保持这个页面打开、屏幕亮着。')}</p>
+    ${isNew ? `<label class="section"><span class="label">${tr('项目名称')}</span><input class="field" id="uName" autocomplete="off" placeholder="${tr('比如：京都 2026 秋')}"></label>` : ''}
+    <div class="toolbar" style="flex-wrap:wrap">
+      <label class="ghost upick" id="uPickFiles">${tr('选择视频')}<input type="file" id="uFiles" multiple accept="video/*,.mov,.mp4,.m4v,.mts,.m2ts,.avi,.mkv,.insv,.lrv" hidden></label>
+      ${canDir ? `<label class="ghost upick" id="uPickDir">${tr('选择整个文件夹')}<input type="file" id="uDir" webkitdirectory multiple hidden></label>` : ''}
+    </div>
+    <div class="note" id="uInfo">${tr('还没有选视频')}</div>
+    <div id="uProg" hidden><div class="bar"><i id="uFill" style="width:0%"></i></div><div class="note mono" id="uNow" style="margin-top:6px;word-break:break-all"></div></div>
+    <div class="row-end"><button class="ghost" value="">${tr('取消')}</button><button class="btn" type="button" id="uGo" disabled>${tr('开始上传')}</button></div>`;
+  const d = $('#modal');
+  const r = await modal(html, (b, close) => {
+    const info = (t) => { $('#uInfo', b).textContent = t; };
+    const pick = (list) => {
+      files = [...list].filter((f) => VIDEO_RE.test(f.name) || (f.type || '').startsWith('video/'));
+      const tot = files.reduce((a, f) => a + f.size, 0);
+      info(files.length ? tr('已选 {0} 个视频，共 {1}', files.length, fmtSize(tot)) : tr('还没有选视频'));
+      $('#uGo', b).disabled = !files.length;
+    };
+    const lock = (on) => {
+      busy = on; S.uploading = on;
+      b.querySelectorAll('input').forEach((x) => { x.disabled = on; });
+      b.querySelectorAll('.upick').forEach((x) => { x.style.opacity = on ? 0.5 : ''; x.style.pointerEvents = on ? 'none' : ''; });
+      $('#uGo', b).disabled = on || !files.length;
+    };
+    b.addEventListener('change', (e) => { if (e.target.type === 'file') pick(e.target.files); });
+    b.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'uName') e.preventDefault(); });
+    d.oncancel = (e) => { if (busy) { e.preventDefault(); info(tr('正在上传。要停下请点“取消”。')); } };
+    d.addEventListener('close', () => { aborted = true; }, { once: true });
+    $('#uGo', b).addEventListener('click', async () => {
+      if (isNew) {
+        const n = $('#uName', b).value.trim();
+        if (!n) { info(tr('请填写项目名称')); $('#uName', b).focus(); return; }
+        if (!pid && S.projects.some((x) => x.id === n)) { info(tr('已经有同名项目：{0}', n)); return; }
+        pid = n;
+      }
+      lock(true);
+      $('#uProg', b).hidden = false;
+      try { wake = navigator.wakeLock ? await navigator.wakeLock.request('screen') : null; } catch (e) { wake = null; }
+      const total = files.reduce((a, f) => a + f.size, 0) || 1;
+      let doneBytes = 0;
+      const t0 = Date.now();
+      let sent = 0;
+      try {
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i];
+          const st = await upReq(pid, { name: upName(f), total: f.size, probe: 1 });
+          footage = st.footage;
+          let have = st.have;
+          const show = () => {
+            const pct = Math.min(100, (100 * (doneBytes + have)) / total);
+            const sec = (Date.now() - t0) / 1000, speed = sec > 1 ? sent / sec : 0;
+            $('#uFill', b).style.width = pct.toFixed(1) + '%';
+            $('#uNow', b).textContent = `${i + 1}/${files.length} · ${st.name} · ${fmtSize(doneBytes + have)} / ${fmtSize(total)}`
+              + (speed ? ` · ${fmtSize(speed)}/s` : '') + (st.done ? ` · ${tr('已经传过，跳过')}` : '');
+          };
+          show();
+          while (have < f.size) {
+            if (aborted) return;
+            const before = have;
+            const res = await upReq(pid, { name: st.name, total: f.size, offset: have, mtime: f.lastModified || 0 }, f.slice(have, Math.min(f.size, have + UP_CHUNK)));
+            have = res.have;
+            sent += Math.max(0, have - before);
+            show();
+          }
+          doneBytes += f.size;
+        }
+        if (!aborted) close('ok');
+      } catch (e) {
+        if (!aborted) info(tr('上传中断：{0}。再点一次“开始上传”会从断点继续。', e.message));
+      } finally {
+        lock(false);
+        if (wake) wake.release().catch(() => {});
+      }
+    });
+  });
+  d.oncancel = null; S.uploading = false;
+  if (r !== 'ok' || !footage) return;
+  toast(tr('上传完成，开始扫描'));
+  await startJob('/api/projects', { footage, name: pid }, () => {
+    location.hash = '#footage';
+    startJob(`${P()}/analyze`, { mock: mockOn(), whisper: S.whisper });
+  });
 }
 
 /* ---------------------------------------------------------------- data */
@@ -276,6 +395,8 @@ function renderJob() {
 function render() {
   const page = (location.hash || '#footage').slice(1);
   S.page = ['plan', 'footage', 'story', 'timeline', 'lab', 'export', 'settings', 'logs'].includes(page) ? page : 'footage';
+  if (REMOTE() && (S.page === 'settings' || S.page === 'logs')) S.page = 'footage';   // 远程用户不能进设置和日志
+  document.body.classList.toggle('remote', REMOTE());
   document.body.classList.toggle('on-settings', S.page === 'settings');
   renderHeader();
   const active = document.activeElement;
@@ -297,8 +418,9 @@ function viewWelcome() {
         <p>${tr('先写一份拍摄脚本：AI 帮你想好每天要拍哪些镜头，回来之后剪起来更顺。')}</p>
         <div class="foot"><button type="button" class="ghost outline" data-act="new-plan-project" ${dis()}>${tr('先写拍摄脚本')}</button></div></section>
       <section class="ex-card"><h3 style="font-size:18px">${tr('已经拍完了？')}</h3>
-        <p>${tr('选一个放着这趟旅行视频的文件夹（子文件夹也行）。AI 会逐个镜头看一遍，你写下想讲的故事，它用真实拍到的素材搭出结构，再剪成一条可以继续编辑的时间线。')}</p>
-        <div class="foot"><button type="button" class="btn" data-act="new-project" ${dis()}>${tr('选择素材文件夹')}</button></div></section>
+        <p>${tr('从手机相册或这台设备上选出这趟旅行的视频上传。AI 会逐个镜头看一遍，你写下想讲的故事，它用真实拍到的素材搭出结构，再剪成一条可以继续编辑的时间线。')}</p>
+        <div class="foot" style="flex-direction:column"><button type="button" class="btn" data-act="upload-new" ${dis()}>${tr('从这台设备上传视频')}</button>
+          ${REMOTE() ? '' : `<button type="button" class="ghost" data-act="new-project" ${dis()}>${tr('素材已经在电脑上？选电脑里的文件夹')}</button>`}</div></section>
     </div></div></div></div>`;
 }
 
@@ -965,7 +1087,8 @@ function cardHtml(s) {
 function gridHtml() {
   if (!S.shots.length && !S.p.footage) {
     return `<div class="empty"><h2>${tr('还没有素材')}</h2>
-      <p style="margin:0;max-width:440px;line-height:1.7">${tr('拍完之后，在左边选择素材文件夹。出发前可以先去“拍摄脚本”想好要拍什么。')}</p>
+      <p style="margin:0;max-width:440px;line-height:1.7">${tr('拍完之后，从手机相册或这台设备上传视频。出发前可以先去“拍摄脚本”想好要拍什么。')}</p>
+      <button type="button" class="btn" data-act="upload-more" ${dis()}>${tr('从这台设备上传视频')}</button>
       <a class="ghost" href="#plan">${tr('去写拍摄脚本')}</a></div>`;
   }
   if (!S.shots.length) {
@@ -1046,7 +1169,8 @@ function viewFootage() {
       <section class="section">
         <div class="label">${tr('素材文件夹')}</div>
         <div class="path">${esc(p.footage || '–')}</div>
-        <button type="button" class="${p.footage ? 'ghost' : 'btn'}" data-act="rescan" ${dis()}>${p.footage ? tr('更换文件夹 / 重新扫描') : tr('选择素材文件夹')}</button>
+        <button type="button" class="${p.footage ? 'ghost' : 'btn'}" data-act="upload-more" ${dis()}>${tr('从这台设备上传视频')}</button>
+        ${REMOTE() ? '' : `<button type="button" class="ghost" data-act="rescan" ${dis()}>${p.footage ? tr('更换文件夹 / 重新扫描') : tr('选电脑里的文件夹')}</button>`}
         <div class="stats" style="margin-top:4px"><div><b>${p.clips}</b><span>${tr('文件')}</span></div><div><b>${p.shots}</b><span>${tr('镜头')}</span></div><div><b>${mmss(p.duration_min * 60)}</b><span>${tr('总时长')}</span></div></div>
       </section>
       <section class="section" id="fProgress">${progressHtml()}</section>
@@ -1147,7 +1271,8 @@ function viewStory() {
       <div class="section"><div class="label">${tr('背景音乐（渲染时自动卡点，对白时自动压低）')}</div>
         <div class="path" style="display:flex;align-items:center;gap:8px">${s.music ? `<span style="flex:1">${esc(s.music.split(/[\\/]/).pop())}</span>` : `<span style="flex:1" class="muted">${tr('不加音乐')}</span>`}
           ${s.music ? `<button type="button" class="ghost sm" data-act="clear-music">${tr('移除')}</button>` : ''}
-          <button type="button" class="ghost sm" data-act="pick-music">${s.music ? tr('更换') : tr('选择')}</button></div></div>
+          ${REMOTE() ? '' : `<button type="button" class="ghost sm" data-act="pick-music">${s.music ? tr('更换') : tr('选择')}</button>`}</div>
+        ${REMOTE() ? `<p class="note">${tr('背景音乐要在运行 studio 的电脑上选。')}</p>` : ''}</div>
       <button type="button" class="btn" style="min-height:48px;font-size:15px" data-act="outline" ${!ready || jobRunning() ? 'disabled' : ''}>${ol ? tr('重新生成故事线') : tr('让 AI 提出分幕')}</button>
       ${!ready ? `<p class="note">${tr('需要先在“素材”里完成 AI 看片。')}</p>` : ''}
     </aside>
@@ -1341,7 +1466,7 @@ function viewExport() {
       <section class="ex-card"><div class="hd">${icon('<path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2"/>')}<h2>${tr('剪辑清单 story.json')}</h2></div>
         <p>${tr('纯文本 JSON，可以直接手改入点、出点、字幕。改完点“重新校验”，故事板和 XML 会一起更新。')}</p>
         <p class="mono" style="font-size:12px;word-break:break-all">${esc(p.path || '')}</p>
-        <div class="foot"><button type="button" class="ghost" data-act="open-folder">${tr('打开项目文件夹')}</button>
+        <div class="foot">${REMOTE() ? '' : `<button type="button" class="ghost" data-act="open-folder">${tr('打开项目文件夹')}</button>`}
           <button type="button" class="ghost" data-act="recheck" ${dis()}>${tr('重新校验')}</button></div></section>
       <section class="ex-card"><div class="hd">${icon('<path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v5"/>')}<h2>${tr('分镜表')}</h2></div>
         <p>${tr('每个镜头的缩略图、选它的理由、它在成片里的位置。可以打印，也方便发给同行的人看。')}</p>
@@ -1654,6 +1779,9 @@ function viewSettings() {
       <div class="set-row"><label class="lbl" for="cfgOrigins">${tr('允许访问的网页')} <span class="help" style="font-weight:400">${tr('（一般不用改）')}</span></label>
         <input id="cfgOrigins" class="field mono" style="font-size:13px" data-cfg="allowed_origins" value="${esc(d.allowed_origins || '')}" placeholder="https://my-app.vercel.app">
         <div class="help">${tr('只有本机网页和 Lovable 可以调用这个后端。别的前端（比如自己部署的网站）要在这里填它的地址，多个用逗号隔开。不要填 *。')}</div></div>
+      <div class="set-row"><label class="lbl" for="cfgRemotePw">${tr('远程访问密码')}</label>
+        <input id="cfgRemotePw" class="field" style="max-width:320px" data-cfg="remote_password" value="${esc(d.remote_password || '')}" autocomplete="off" placeholder="${tr('留空 = 不允许远程访问')}">
+        <div class="help">${tr('用 tailscale funnel 把 studio 公开成网址后，别人打开网址要先输这个密码（每台手机输一次就记住）。远程的人可以上传视频、剪辑、导出，但看不到这台电脑的文件夹、设置和 API Key。改密码后，所有人都要重新输入。留空就完全不允许远程访问。在这台电脑上直接打开不需要密码。')}</div></div>
     </section>
     </main>
   </div>
@@ -1952,6 +2080,8 @@ document.addEventListener('click', async (e) => {
 
   switch (d.act) {
     case 'new-project': return newProject();
+    case 'upload-new': return uploadVideos(true);
+    case 'upload-more': return uploadVideos(false);
     case 'new-plan-project': return newPlanProject('');
     case 'make-plan': {
       const brief = $('#pBrief').value.trim();
@@ -2130,7 +2260,7 @@ document.addEventListener('input', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.id === 'projectSelect') {
-    if (t.value === '__new') { t.value = S.pid || ''; return newProject(); }
+    if (t.value === '__new') { t.value = S.pid || ''; return REMOTE() ? uploadVideos(true) : newProject(); }
     if (S.tlDirty && !(await confirmBox(tr('放弃未保存的时间线修改？'), tr('切换项目会丢掉还没保存的修改。'), tr('放弃并切换')))) { t.value = S.pid; return; }
     return switchProject(t.value);
   }
@@ -2267,7 +2397,7 @@ window.addEventListener('hashchange', async () => {
   if (location.hash === '#logs') { S.logs = null; }
   render(); window.scrollTo(0, 0);
 });
-window.addEventListener('beforeunload', (e) => { if (S.tlDirty) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', (e) => { if (S.tlDirty || S.uploading) { e.preventDefault(); e.returnValue = ''; } });
 
 /* ---------------------------------------------------------------- 启动 */
 (async function boot() {

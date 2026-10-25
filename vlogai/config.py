@@ -78,6 +78,7 @@ DEFAULTS: dict = {
     "projects_dir": "projects",
     "log_level": "INFO",          # DEBUG 会额外记录每一个接口请求
     "allowed_origins": "",        # 额外允许调用本地后端的网页，逗号分隔，例如 https://my-app.vercel.app
+    "remote_password": "",        # 远程访问密码（tailscale funnel 公开后，别人打开网址要输入）。留空 = 不允许远程访问
 }
 
 SCENE_THRESHOLDS = {"low": 35.0, "mid": 27.0, "high": 20.0}   # PySceneDetect ContentDetector

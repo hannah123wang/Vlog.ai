@@ -31,6 +31,8 @@ h1, h2, h3 { font-family: var(--serif); margin: 0; }
 .ghost:hover { background: var(--raise); color: var(--text); }
 .ghost.danger { color: var(--danger); }
 .outline { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+body.remote #gearBtn, body.remote #keyState, body.remote #logsBtn { display: none !important; }
+.upick { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .sm { min-height: 34px; padding: 0 10px; font-size: 13px; }
 button:disabled, .btn[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
 .chip { min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line);
